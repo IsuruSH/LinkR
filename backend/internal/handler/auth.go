@@ -3,6 +3,8 @@ package handler
 import (
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/IsuruSh/linkr/internal/httpx"
 	"github.com/IsuruSh/linkr/internal/service"
 )
@@ -13,6 +15,17 @@ type AuthHandler struct {
 
 func NewAuthHandler(svc *service.AuthService) *AuthHandler {
 	return &AuthHandler{svc: svc}
+}
+
+// Routes returns the /api/auth group. Both routes are public by definition:
+// you cannot present a token before you have one.
+func (h *AuthHandler) Routes() chi.Router {
+	r := chi.NewRouter()
+
+	r.Post("/register", h.Register)
+	r.Post("/login", h.Login)
+
+	return r
 }
 
 // Register handles POST /api/auth/register.

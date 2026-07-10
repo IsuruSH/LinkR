@@ -23,6 +23,24 @@ func NewLinkHandler(svc *service.LinkService, baseURL string) *LinkHandler {
 	return &LinkHandler{svc: svc, baseURL: baseURL}
 }
 
+// Routes returns the /api/links group. Every route in it is protected, so the
+// middleware is applied once to the whole sub-router rather than repeated per
+// route — a route added later cannot forget it.
+//
+// requireAuth is passed in rather than stored on the handler so the mount site
+// in main.go shows, in one line, that this group is guarded.
+func (h *LinkHandler) Routes(requireAuth func(http.Handler) http.Handler) chi.Router {
+	r := chi.NewRouter()
+	r.Use(requireAuth)
+
+	r.Post("/", h.Create)
+	r.Get("/", h.List)
+	r.Get("/{code}/stats", h.Stats)
+	r.Delete("/{code}", h.Delete)
+
+	return r
+}
+
 // Redirect is the hot path. GET /{code}, public, no auth.
 //
 // Order of operations is the entire point of this handler:
