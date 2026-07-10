@@ -48,9 +48,16 @@ type Querier interface {
 	// counter increment commit or roll back together.
 	//
 	// Static SQL over two parallel arrays rather than a dynamically built VALUES
-	// list: one prepared statement, one plan, no string building. Ordering the
-	// update by id keeps concurrent worker transactions from deadlocking when their
-	// batches touch the same links in different orders.
+	// list: one prepared statement, one query plan, no string building.
+	//
+	// Deadlock note: two workers whose batches touch the same links can, in
+	// principle, take row locks in opposing orders. The caller sorts link_ids so the
+	// common plan (nested loop over v) acquires them in a consistent order, but
+	// Postgres does not *guarantee* update order from a subquery, so this reduces
+	// the window rather than closing it. If a deadlock does occur, Postgres aborts
+	// one transaction, the worker logs it and increments clicks_lost. Losing one
+	// batch of analytics to a rare deadlock is an acceptable trade for not holding a
+	// global lock on the redirect path.
 	IncrementClickCounts(ctx context.Context, arg IncrementClickCountsParams) error
 	// Row-value comparison, not `created_at < x OR (created_at = x AND id < y)`.
 	// Postgres can drive links_user_created_idx directly from a row constructor,
