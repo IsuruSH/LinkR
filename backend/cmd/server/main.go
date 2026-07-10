@@ -20,30 +20,33 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/IsuruSh/linkr/internal/config"
 	"github.com/IsuruSh/linkr/internal/domain"
 	"github.com/IsuruSh/linkr/internal/httpx"
 	"github.com/IsuruSh/linkr/internal/middleware"
+	"github.com/IsuruSh/linkr/migrations"
 )
 
 func main() {
 	// -healthcheck exists because the distroless final image has no shell and no
 	// curl, so the container healthcheck has to be the binary itself.
 	healthcheck := flag.Bool("healthcheck", false, "probe the local /readyz endpoint and exit")
+	migrateOnly := flag.Bool("migrate", false, "apply pending migrations and exit")
 	flag.Parse()
 
 	if *healthcheck {
 		os.Exit(runHealthcheck())
 	}
 
-	if err := run(); err != nil {
+	if err := run(*migrateOnly); err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(migrateOnly bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		// Config errors happen before the logger exists, and they are the most
@@ -53,11 +56,34 @@ func run() error {
 
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
+
+	ctx := context.Background()
+
+	pool, err := newPool(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("connecting to postgres: %w", err)
+	}
+	defer pool.Close()
+
+	// Migrations run on every boot. goose takes an advisory lock, so N replicas
+	// starting at once is safe: one applies, the rest no-op.
+	migrateCtx, cancelMigrate := context.WithTimeout(ctx, 60*time.Second)
+	err = migrations.Up(migrateCtx, pool)
+	cancelMigrate()
+	if err != nil {
+		return err
+	}
+	logger.Info("migrations applied")
+
+	if migrateOnly {
+		return nil
+	}
+
 	logger.Info("starting linkr", "env", cfg.AppEnv, "port", cfg.Port)
 
 	srv := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),
-		Handler:           newRouter(cfg, logger),
+		Handler:           newRouter(cfg, logger, pool),
 		ReadHeaderTimeout: 5 * time.Second, // slowloris
 		IdleTimeout:       120 * time.Second,
 	}
@@ -91,17 +117,45 @@ func run() error {
 		logger.Info("shutdown signal received", "signal", sig.String())
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
 	logger.Info("shutdown complete")
 	return nil
 }
 
-func newRouter(cfg config.Config, logger *slog.Logger) http.Handler {
+// newPool applies the sizing from config.DBConfig, which carries the rationale.
+func newPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
+	poolCfg, err := pgxpool.ParseConfig(cfg.DatabaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing DATABASE_URL: %w", err)
+	}
+
+	poolCfg.MaxConns = cfg.DB.MaxConns
+	poolCfg.MinConns = cfg.DB.MinConns
+	poolCfg.MaxConnLifetime = cfg.DB.MaxConnLifetime
+	poolCfg.MaxConnIdleTime = cfg.DB.MaxConnIdleTime
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		return nil, err
+	}
+
+	// NewWithConfig is lazy. Ping so a bad DSN or an unreachable database fails
+	// at boot rather than on the first request.
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return pool, nil
+}
+
+func newRouter(cfg config.Config, logger *slog.Logger, pool *pgxpool.Pool) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -127,16 +181,34 @@ func newRouter(cfg config.Config, logger *slog.Logger) http.Handler {
 		httpx.Error(w, r, domain.NewError(domain.CodeMethodNotAllowed, "method not allowed for this route"))
 	})
 
-	// Liveness: "the process is up." Never touches a dependency — if this fails,
-	// restarting helps. Readiness answers "can I serve traffic," which is a
-	// different question, and it gains real dependency probes in a later slice.
+	// Liveness: "the process is up." Never touches a dependency. If a dependency
+	// were probed here, a Postgres blip would make Kubernetes kill every healthy
+	// replica — restarting cannot fix someone else's database.
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+
+	// Readiness: "can I serve traffic right now." This is where dependencies
+	// belong: a failing probe pulls the replica out of the load balancer without
+	// killing it. Redis joins this list in the next slice.
 	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_, _ = w.Write([]byte(`{"status":"ready"}`))
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		checks := map[string]string{"postgres": "ok"}
+		status := http.StatusOK
+
+		if err := pool.Ping(ctx); err != nil {
+			checks["postgres"] = "unreachable"
+			status = http.StatusServiceUnavailable
+			logger.WarnContext(ctx, "readiness probe failed", "dependency", "postgres", "error", err)
+		}
+
+		httpx.JSON(w, status, map[string]any{
+			"status": map[bool]string{true: "ready", false: "degraded"}[status == http.StatusOK],
+			"checks": checks,
+		})
 	})
 
 	return r

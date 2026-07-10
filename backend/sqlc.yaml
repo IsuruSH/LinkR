@@ -1,0 +1,37 @@
+version: "2"
+sql:
+  - engine: postgresql
+    # The migrations ARE the schema of record. sqlc type-checks every query in
+    # queries/ against them at generate time, so a renamed column breaks the
+    # build rather than production.
+    schema: "migrations"
+    queries: "internal/db/queries"
+    gen:
+      go:
+        package: "db"
+        out: "internal/db"
+        # pgx/v5 unlocks :copyfrom, which is how the click worker writes batches.
+        sql_package: "pgx/v5"
+        # Generates a Querier interface: service tests fake it without a database.
+        emit_interface: true
+        # Return [] rather than nil, so an empty page marshals to `[]` not `null`.
+        emit_empty_slices: true
+        emit_pointers_for_null_types: true
+        overrides:
+          # Default is pgtype.UUID, which leaks a driver type through the
+          # repository and into anything that touches an ID.
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "citext"
+            go_type: "string"
+          # Default is pgtype.Timestamptz, a driver struct with a Valid flag.
+          # Letting it through means every layer above unwraps .Time.
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+          - db_type: "date"
+            go_type: "time.Time"
