@@ -207,7 +207,7 @@ func TestIntegration_CreateRedirectClickStats(t *testing.T) {
 // the write is on the critical path.
 func TestIntegration_RedirectDoesNotWaitForTheClickWrite(t *testing.T) {
 	cfg := defaultClickCfg()
-	cfg.BatchSize = 10_000       // never reached
+	cfg.BatchSize = 10_000        // never reached
 	cfg.FlushInterval = time.Hour // never fires during the test
 
 	h := newHarness(t, cfg)
