@@ -55,6 +55,25 @@ services:
       start_period: 10s
     networks: [linkr_net]
 
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the client bundle: this is the address the BROWSER uses,
+        # so it must be reachable from the host, not from inside the network.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8080}
+      # The address the Next SERVER uses for the BFF proxy hop. Inside the
+      # container "localhost" is the frontend itself, so it must be the service
+      # name on linkr_net.
+      BACKEND_INTERNAL_URL: http://backend:8080
+    depends_on:
+      backend: {condition: service_healthy}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    networks: [linkr_net]
+
 volumes:
   postgres_data:
   redis_data:
