@@ -1,0 +1,25 @@
+# Environment — .env.example is committed, .env never is
+.env
+.env.local
+.env.*.local
+
+# Go
+/backend/bin/
+*.test
+*.out
+
+# Node / Next
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

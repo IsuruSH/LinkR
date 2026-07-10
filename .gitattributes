@@ -1,0 +1,8 @@
+# Normalize to LF in the repo. Without this, a Windows checkout hands CRLF to the
+# Linux build containers, and a Makefile or shell script with CRLF fails in ways
+# that look nothing like a line-ending problem.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
