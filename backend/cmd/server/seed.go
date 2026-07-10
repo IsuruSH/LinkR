@@ -36,6 +36,51 @@ var seedLinks = []seedLink{
 	{"nextjs", "https://nextjs.org/docs/app", 0}, // exercises the empty-stats path
 }
 
+// seedAdvisoryLockKey is an arbitrary constant. Postgres advisory locks are
+// keyed by a bare int64, so the value only has to be unique within this app.
+const seedAdvisoryLockKey int64 = 0x1189_5EED
+
+// seedIfEmpty seeds a fresh development database on boot, so that
+// `docker compose up --build` alone produces a demo the reviewer can log into.
+//
+// Two guards:
+//
+//   - Never in production. A seed that can touch a real database is a loaded gun.
+//   - An advisory lock, because `--scale backend=3` boots three replicas that all
+//     reach this line at once. Without it they race: each sees an empty users
+//     table and three of them insert the same links, tripling the click history.
+//     The lock serializes them; the losers find a non-empty table and skip.
+func seedIfEmpty(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection for seed: %w", err)
+	}
+	defer conn.Release()
+
+	// Session-scoped, not transaction-scoped: the seed spans many statements and
+	// we want to hold the lock across all of them.
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, seedAdvisoryLockKey); err != nil {
+		return fmt.Errorf("taking seed advisory lock: %w", err)
+	}
+	defer func() {
+		if _, err := conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, seedAdvisoryLockKey); err != nil {
+			logger.Warn("releasing seed advisory lock", "error", err)
+		}
+	}()
+
+	var users int
+	if err := conn.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&users); err != nil {
+		return fmt.Errorf("counting users: %w", err)
+	}
+	if users > 0 {
+		logger.Debug("database already has users, skipping auto-seed")
+		return nil
+	}
+
+	logger.Info("empty development database detected, seeding demo data")
+	return seed(ctx, pool, logger)
+}
+
 // seed inserts a demo user, a handful of links, and 30 days of backdated clicks.
 //
 // It is idempotent: re-running it is a no-op rather than an error, so

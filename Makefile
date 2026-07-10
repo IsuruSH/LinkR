@@ -38,7 +38,13 @@ test-host: ## Unit tests on the host toolchain (no race detector without cgo)
 
 test-integration: .env ## Integration tests against real Postgres + Redis
 	docker compose up -d postgres redis
-	docker compose run --rm --entrypoint go backend test -race -tags=integration ./tests/...
+	@echo "waiting for dependencies..."
+	@until [ "$$(docker compose ps -q postgres | xargs docker inspect -f '{{.State.Health.Status}}')" = "healthy" ]; do sleep 1; done
+	docker run --rm --network linkr_linkr_net \
+		-v "$(CURDIR)/backend:/src" -v linkr_gomod:/go/pkg/mod -w /src \
+		-e DATABASE_URL="postgres://$${POSTGRES_USER:-linkr}:$${POSTGRES_PASSWORD:-linkr_dev_password}@postgres:5432/$${POSTGRES_DB:-linkr}?sslmode=disable" \
+		-e REDIS_URL="redis://redis:6379/1" \
+		$(GO_IMAGE) go test -race -tags=integration -v ./tests/...
 
 lint: ## go vet + gofmt check
 	cd backend && go vet ./...

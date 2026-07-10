@@ -91,6 +91,16 @@ func run(migrateOnly, seedOnly bool) error {
 		return seed(ctx, pool, logger)
 	}
 
+	// Auto-seed an empty development database, so `docker compose up --build` is
+	// genuinely one command to a working demo. Guarded on APP_ENV and on the
+	// users table being empty; see seedIfEmpty for why it takes an advisory lock.
+	if !cfg.IsProduction() {
+		if err := seedIfEmpty(ctx, pool, logger); err != nil {
+			// A broken demo seed must not stop the server from serving.
+			logger.Error("auto-seed failed; continuing without demo data", "error", err)
+		}
+	}
+
 	redis, err := cache.NewRedis(ctx, cfg.RedisURL)
 	if err != nil {
 		return fmt.Errorf("connecting to redis: %w", err)
