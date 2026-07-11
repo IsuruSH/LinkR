@@ -30,13 +30,24 @@ STAGING="$(env_val CERTBOT_STAGING)"
 [[ -n "$DOMAIN" ]] || { echo "ERROR: set DOMAIN in .env (e.g. parfumworld.store)." >&2; exit 1; }
 [[ -n "$EMAIL"  ]] || { echo "ERROR: set CERTBOT_EMAIL in .env." >&2; exit 1; }
 
-# --- Already have a real cert? Then there is nothing to do. -----------------
-# The placeholder below is self-signed with CN=localhost; a real Let's Encrypt
-# cert is not, so that distinguishes them.
-if $COMPOSE run --rm --entrypoint sh certbot -c \
-     "[ -f $LIVE/fullchain.pem ] && ! openssl x509 -in $LIVE/fullchain.pem -noout -subject | grep -q 'CN *= *localhost'" \
-     >/dev/null 2>&1; then
-  echo "==> TLS certificate already present for $CERT_NAME — nothing to do."
+# --- Do we already have the cert we WANT? Then there is nothing to do. -------
+# We must distinguish three cases via the certificate itself:
+#   * placeholder  -> subject CN=localhost (created below); always reissue
+#   * staging cert -> issuer contains "STAGING"/"Fake"; untrusted by browsers
+#   * real cert    -> production Let's Encrypt
+# Skip only when the existing cert matches the desired mode. Crucially, a staging
+# cert when CERTBOT_STAGING=0 does NOT count as done — otherwise flipping to
+# production and re-running would never replace the untrusted staging cert.
+want_prod=1; [[ "$STAGING" == "1" ]] && want_prod=0
+if $COMPOSE run --rm --entrypoint sh certbot -c "
+    f=$LIVE/fullchain.pem
+    [ -f \"\$f\" ] || exit 1
+    openssl x509 -in \"\$f\" -noout -subject 2>/dev/null | grep -q 'CN *= *localhost' && exit 1
+    if [ $want_prod -eq 1 ]; then
+      openssl x509 -in \"\$f\" -noout -issuer 2>/dev/null | grep -qiE 'staging|fake' && exit 1
+    fi
+    exit 0" >/dev/null 2>&1; then
+  echo "==> TLS certificate already present for $CERT_NAME and matches the desired mode — nothing to do."
   exit 0
 fi
 
