@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
-# Full production deploy on a single host (EC2).
+# Production deploy on a single host (EC2).
 #
 #   bash scripts/deploy.sh
 #
-# Use this for a normal release, or after base images / dependencies change:
-# it pulls code, refreshes the third-party images, rebuilds the app images,
-# restarts everything, and reclaims disk from old layers.
+# Images are built and pushed by CI (GitHub Actions -> GHCR); this host only
+# PULLS them, so no compiler ever runs here — deploys take seconds and a 1 GB
+# instance never OOMs mid-build.
 #
-# For a quicker app-only release that leaves the database and cache running,
-# use scripts/update.sh instead.
+# One-time on this host, for private GHCR images:
+#   echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-username> --password-stdin
+# (a Personal Access Token with read:packages scope)
 
 set -euo pipefail
 
@@ -25,22 +26,19 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-echo "==> [1/5] Pulling latest code"
+echo "==> [1/4] Pulling latest code"
 # --ff-only refuses to create a surprise merge commit if local history diverged.
 git pull --ff-only
 
-echo "==> [2/5] Refreshing third-party images (postgres, redis, nginx)"
-# Only the image-based services. The app services are built below, so a bare
-# 'compose pull' would just warn about them.
-$COMPOSE pull postgres redis nginx
+echo "==> [2/4] Pulling images (app images from GHCR; postgres/redis/nginx official)"
+# Fails with 'denied' if this host has not `docker login ghcr.io`'d for private
+# images — see the header for the one-time login.
+$COMPOSE pull
 
-echo "==> [3/5] Building application images (backend, frontend)"
-$COMPOSE build
-
-echo "==> [4/5] Starting / updating containers (waiting for healthchecks)"
+echo "==> [3/4] Starting / updating containers (waiting for healthchecks)"
 $COMPOSE up -d --remove-orphans --wait
 
-echo "==> [5/5] Pruning dangling images"
+echo "==> [4/4] Pruning dangling images"
 docker image prune -f
 
 echo

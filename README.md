@@ -158,11 +158,26 @@ Docker Compose — one host, one command — just a different compose file.
    - `POSTGRES_PASSWORD` — a real password.
    - `SEED_DEMO_DATA` — `true` for a demo, `false` for a clean install.
 
-4. **Start it:**
+4. **Log in to the image registry (one-time).** The app images are built by CI
+   and stored privately in GHCR, so the host authenticates once to pull them:
    ```bash
-   docker compose -f docker-compose.prod.yml up -d --build
+   echo "<GHCR_TOKEN>" | docker login ghcr.io -u <github-username> --password-stdin
    ```
+   `<GHCR_TOKEN>` is a GitHub Personal Access Token with the `read:packages`
+   scope. (Skip this if you made the images public.)
+
+5. **Start it:**
+   ```bash
+   docker compose -f docker-compose.prod.yml up -d
+   ```
+   This **pulls** the images and starts everything — no build runs on the host.
    The app is now on `http://<APP_ORIGIN>/`.
+
+> **Images are built in CI, not on the server.** GitHub Actions builds the
+> backend and frontend on every push to `main` and pushes them to GHCR
+> (`ghcr.io/<owner>/linkr-backend` / `-frontend`). The EC2 host only pulls, so a
+> small instance never compiles (and never OOMs mid-build). To roll back, set
+> `IMAGE_TAG` in `.env` to a specific commit SHA and re-run the deploy.
 
 ### Operating it
 
@@ -180,12 +195,14 @@ BACKEND_REPLICAS=3 docker compose -f docker-compose.prod.yml up -d
 
 ### Updating
 
-Two scripts in `scripts/` (run with `bash scripts/<name>.sh`):
+Push to `main`, let CI build and push the new images, then on the host run one of
+the scripts in `scripts/` (with `bash scripts/<name>.sh`):
 
-- **`deploy.sh`** — full release: pull code, refresh base images, rebuild,
-  restart, prune. Use after dependency or base-image changes.
-- **`update.sh`** — app-only, minimal downtime: rebuilds just backend + frontend,
-  swaps them one at a time, reloads Nginx, and leaves Postgres/Redis untouched.
+- **`deploy.sh`** — full release: pull code, **pull** all images, restart, prune.
+  Deploys take seconds because nothing is compiled on the host.
+- **`update.sh`** — app-only, minimal downtime: pulls just the new backend +
+  frontend images, swaps them one at a time, reloads Nginx, and leaves
+  Postgres/Redis untouched.
 
 ### Backups
 

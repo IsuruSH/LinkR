@@ -4,9 +4,10 @@
 #
 #   bash scripts/update.sh
 #
-# Rebuilds ONLY the backend and frontend, swaps them one at a time, and reloads
-# Nginx so it picks up the new container IPs. Postgres and Redis are left running
-# untouched — an app release never restarts the data layer.
+# Pulls the new backend and frontend images from GHCR (built by CI), swaps them
+# one at a time, and reloads Nginx so it picks up the new container IPs. Postgres
+# and Redis are left running untouched — an app release never restarts the data
+# layer.
 #
 # Honest about the limits: this is a FEW-SECONDS-PER-SERVICE gap, not true
 # zero-downtime. On a single Compose host the old container stops before the new
@@ -28,9 +29,9 @@ fi
 echo "==> [1/5] Pulling latest code"
 git pull --ff-only
 
-echo "==> [2/5] Building new application images (no disruption yet)"
-# Built before anything is swapped, so a build failure never leaves the site down.
-$COMPOSE build backend frontend
+echo "==> [2/5] Pulling new application images from GHCR (no disruption yet)"
+# Fetched before anything is swapped, so a bad pull never leaves the site down.
+$COMPOSE pull backend frontend
 
 # Swap one service at a time, wait for its healthcheck, then reload Nginx before
 # touching the next — so each service's gap is only its own recreate, and the two

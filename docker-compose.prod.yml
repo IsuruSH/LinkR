@@ -49,6 +49,10 @@ services:
 
   # ── Frontend (Next.js) — internal only ─────────────────────────────────
   frontend:
+    # Pulled from GHCR (built + pushed by CI). `build:` stays as a local
+    # fallback: `compose pull` fetches this image, `compose build` recreates it.
+    # IMAGE_TAG can pin a commit SHA for a rollback; defaults to latest.
+    image: ${IMAGE_PREFIX:-ghcr.io/isurush/linkr}-frontend:${IMAGE_TAG:-latest}
     build:
       context: ./frontend
       args:
@@ -76,6 +80,7 @@ services:
 
   # ── Backend (Go) — internal only, horizontally scalable ────────────────
   backend:
+    image: ${IMAGE_PREFIX:-ghcr.io/isurush/linkr}-backend:${IMAGE_TAG:-latest}
     build:
       context: ./backend
     # Horizontal scale. Compose v2 honours deploy.replicas on `docker compose up`.
