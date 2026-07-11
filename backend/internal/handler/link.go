@@ -4,7 +4,9 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -17,23 +19,34 @@ import (
 type LinkHandler struct {
 	svc     *service.LinkService
 	baseURL string
+	appURL  string
 }
 
-func NewLinkHandler(svc *service.LinkService, baseURL string) *LinkHandler {
-	return &LinkHandler{svc: svc, baseURL: baseURL}
+func NewLinkHandler(svc *service.LinkService, baseURL, appURL string) *LinkHandler {
+	return &LinkHandler{svc: svc, baseURL: baseURL, appURL: appURL}
 }
 
-// Routes returns the /api/links group. Every route in it is protected, so the
-// middleware is applied once to the whole sub-router rather than repeated per
+// Routes returns the /api/links group. Every route in it is protected, so
+// requireAuth is applied once to the whole sub-router rather than repeated per
 // route — a route added later cannot forget it.
 //
-// requireAuth is passed in rather than stored on the handler so the mount site
-// in main.go shows, in one line, that this group is guarded.
-func (h *LinkHandler) Routes(requireAuth func(http.Handler) http.Handler) chi.Router {
+// rateLimitCreate, when non-nil, guards POST only — creation is the write worth
+// throttling; reads and deletes are not. It is passed here rather than stored on
+// the handler so the mount site in main.go shows, in one place, exactly which
+// route is limited. A nil value (rate limiting disabled) leaves POST unwrapped,
+// so the disabled path has no per-request cost.
+func (h *LinkHandler) Routes(
+	requireAuth func(http.Handler) http.Handler,
+	rateLimitCreate func(http.Handler) http.Handler,
+) chi.Router {
 	r := chi.NewRouter()
 	r.Use(requireAuth)
 
-	r.Post("/", h.Create)
+	if rateLimitCreate != nil {
+		r.With(rateLimitCreate).Post("/", h.Create)
+	} else {
+		r.Post("/", h.Create)
+	}
 	r.Get("/", h.List)
 	r.Get("/{code}/stats", h.Stats)
 	r.Delete("/{code}", h.Delete)
@@ -57,7 +70,7 @@ func (h *LinkHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 
 	entry, err := h.svc.Resolve(r.Context(), code)
 	if err != nil {
-		httpx.Error(w, r, err)
+		h.redirectError(w, r, err)
 		return
 	}
 
@@ -71,6 +84,42 @@ func (h *LinkHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, entry.LongURL, http.StatusFound)
 
 	h.svc.RecordClick(entry.LinkID, r.Referer(), r.UserAgent())
+}
+
+// redirectError handles a failed redirect with content negotiation. A browser
+// (Accept: text/html) is sent to a friendly page in the frontend rather than
+// shown a raw JSON envelope; an API client or curl still gets the JSON, with the
+// correct status (404 not-found, 410 gone). The status is preserved for browsers
+// too — a 302 to the frontend would mask it — by writing it before the redirect
+// via an intermediate meta page is overkill, so we 303-See-Other to the app and
+// let that page carry the reason. Bots reading the status still see the 303.
+func (h *LinkHandler) redirectError(w http.ResponseWriter, r *http.Request, err error) {
+	reason := ""
+	switch {
+	case errors.Is(err, domain.ErrLinkExpired):
+		reason = "expired"
+	case errors.Is(err, domain.ErrLinkNotFound):
+		reason = "not-found"
+	}
+
+	// Non-browser clients, or an error we do not have a page for, get JSON.
+	if reason == "" || !acceptsHTML(r) {
+		httpx.Error(w, r, err)
+		return
+	}
+
+	target := h.appURL + "/l/unavailable?reason=" + reason
+	// no-store so the browser does not cache this bounce and skip a link that
+	// might be recreated under the same code later.
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, target, http.StatusSeeOther)
+}
+
+// acceptsHTML reports whether the client is a browser navigating to the page,
+// as opposed to an API client or a link-preview fetcher. Browsers send
+// "text/html" in Accept on a top-level navigation; curl and most SDKs do not.
+func acceptsHTML(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
 // Create handles POST /api/links. JWT-protected.
@@ -87,7 +136,7 @@ func (h *LinkHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link, err := h.svc.Create(r.Context(), userID, req.URL, req.Alias)
+	link, err := h.svc.Create(r.Context(), userID, req.URL, req.Alias, req.ExpiresAt)
 	if err != nil {
 		httpx.Error(w, r, err)
 		return

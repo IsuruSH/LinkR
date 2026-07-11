@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -31,17 +32,20 @@ func toDomainLink(l db.Link) domain.Link {
 		LongURL:    l.LongUrl,
 		ClickCount: l.ClickCount,
 		CreatedAt:  l.CreatedAt,
+		ExpiresAt:  l.ExpiresAt,
 	}
 }
 
 // Create inserts a link. A duplicate short code surfaces as domain.ErrAliasTaken,
 // whether the code was user-chosen or generated — the service decides whether to
-// retry (generated) or report a conflict (chosen).
-func (r *LinkRepository) Create(ctx context.Context, userID uuid.UUID, shortCode, longURL string) (domain.Link, error) {
+// retry (generated) or report a conflict (chosen). expiresAt is nil for a link
+// that never expires.
+func (r *LinkRepository) Create(ctx context.Context, userID uuid.UUID, shortCode, longURL string, expiresAt *time.Time) (domain.Link, error) {
 	row, err := r.q.CreateLink(ctx, db.CreateLinkParams{
 		UserID:    userID,
 		ShortCode: shortCode,
 		LongUrl:   longURL,
+		ExpiresAt: expiresAt,
 	})
 	switch {
 	case isUniqueViolation(err, constraintShortCodeUnique):

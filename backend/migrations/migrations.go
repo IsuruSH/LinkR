@@ -40,7 +40,7 @@ func Up(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 
 	sqlDB := stdlib.OpenDBFromPool(pool)
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 
 	if err := goose.UpContext(ctx, sqlDB, "."); err != nil {
 		return fmt.Errorf("applying migrations: %w", err)
@@ -59,7 +59,7 @@ func Down(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 
 	sqlDB := stdlib.OpenDBFromPool(pool)
-	defer sqlDB.Close()
+	defer func() { _ = sqlDB.Close() }()
 
 	return goose.DownContext(ctx, sqlDB, ".")
 }

@@ -101,8 +101,11 @@ func run(migrateOnly, seedOnly bool) error {
 	}
 
 	// ── Demo data ─────────────────────────────────────────────────────────
-	// Only in dev, only when the database is empty. See internal/seed.
-	if !cfg.IsProduction() {
+	// Automatic in development. In production it must be asked for explicitly,
+	// via SEED_DEMO_DATA=true — the hosted demo needs it, and the distroless
+	// image has no shell to run `-seed` by hand. Either way the seed no-ops on a
+	// non-empty database. See internal/seed.
+	if !cfg.IsProduction() || cfg.SeedDemoData {
 		if err := seed.RunIfEmpty(ctx, pool, log); err != nil {
 			log.Error("auto-seed failed, continuing without demo data", "error", err)
 		}
@@ -113,12 +116,27 @@ func run(migrateOnly, seedOnly bool) error {
 	if err != nil {
 		return fmt.Errorf("redis init failed: %w", err)
 	}
-	defer redis.Close()
+	defer func() { _ = redis.Close() }()
 	log.Info("Redis connected")
 
 	// ── Auth ──────────────────────────────────────────────────────────────
 	issuer := auth.NewIssuer(cfg.JWTSecret, cfg.JWTTTL)
 	requireAuth := middleware.RequireAuth(issuer)
+
+	// ── Rate limiting ─────────────────────────────────────────────────────
+	// create: per user, guards POST /api/links. auth: per client IP, guards the
+	// unauthenticated /api/auth endpoints against brute force. Both nil when
+	// disabled, so a disabled route is left unwrapped rather than paying a
+	// per-request check. The limiter runs on the same Redis client as the cache.
+	var rateLimitCreate, rateLimitAuth func(http.Handler) http.Handler
+	if cfg.RateLimit.Enabled {
+		rateLimitCreate = middleware.RateLimitByUser(redis, "create", cfg.RateLimit.PerMinute, log)
+		rateLimitAuth = middleware.RateLimitByIP(redis, "auth", cfg.RateLimit.AuthPerMinute, cfg.TrustProxyHeaders, log)
+		log.Info("rate limiting enabled",
+			"create_per_minute", cfg.RateLimit.PerMinute,
+			"auth_per_minute", cfg.RateLimit.AuthPerMinute,
+			"trust_proxy", cfg.TrustProxyHeaders)
+	}
 
 	// ── Repositories ──────────────────────────────────────────────────────
 	// Link and User take db.DBTX, satisfied by the pool today and by a read
@@ -147,14 +165,21 @@ func run(migrateOnly, seedOnly bool) error {
 	authSvc := service.NewAuthService(userRepo, issuer)
 
 	// ── Handlers ──────────────────────────────────────────────────────────
-	linkHandler := handler.NewLinkHandler(linkSvc, cfg.PublicBaseURL)
+	linkHandler := handler.NewLinkHandler(linkSvc, cfg.PublicBaseURL, cfg.AppURL)
 	authHandler := handler.NewAuthHandler(authSvc)
 	healthHandler := handler.NewHealthHandler(pool, redis, log)
 
 	// ── HTTP server ───────────────────────────────────────────────────────
 	srv := &http.Server{
-		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),
-		Handler:           newRouter(cfg, log, requireAuth, linkHandler, authHandler, healthHandler),
+		Addr: net.JoinHostPort("", strconv.Itoa(cfg.Port)),
+		Handler: newRouter(cfg, log, routerDeps{
+			requireAuth:     requireAuth,
+			rateLimitCreate: rateLimitCreate,
+			rateLimitAuth:   rateLimitAuth,
+			link:            linkHandler,
+			auth:            authHandler,
+			health:          healthHandler,
+		}),
 		ReadHeaderTimeout: 5 * time.Second, // slowloris
 		IdleTimeout:       120 * time.Second,
 	}
@@ -181,19 +206,26 @@ func run(migrateOnly, seedOnly bool) error {
 	return shutdown(srv, clickWorker, cfg, log)
 }
 
+// routerDeps are the middleware and handlers newRouter mounts. Grouping them
+// keeps the signature from growing a parameter per feature.
+type routerDeps struct {
+	requireAuth     func(http.Handler) http.Handler
+	rateLimitCreate func(http.Handler) http.Handler // nil when disabled
+	rateLimitAuth   func(http.Handler) http.Handler // nil when disabled
+	link            *handler.LinkHandler
+	auth            *handler.AuthHandler
+	health          *handler.HealthHandler
+}
+
 // newRouter assembles the middleware chain and mounts each handler's route group.
 //
 // Chain order is deliberate: RequestID first so every later log line and panic
 // report carries one; Logger before Recoverer so a panicking request still emits
-// exactly one access log, with its 500.
-func newRouter(
-	cfg config.Config,
-	log *slog.Logger,
-	requireAuth func(http.Handler) http.Handler,
-	links *handler.LinkHandler,
-	authH *handler.AuthHandler,
-	health *handler.HealthHandler,
-) http.Handler {
+// exactly one access log, with its 500. SecureHeaders and MaxBodyBytes run early
+// so they apply to every response and every body, including error paths.
+const maxRequestBodyBytes = 1 << 20 // 1 MiB — far above any legitimate JSON here
+
+func newRouter(cfg config.Config, log *slog.Logger, d routerDeps) http.Handler {
 	// ── CORS ──────────────────────────────────────────────────────────────
 	corsHandler := cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.CORSOrigins,
@@ -209,6 +241,8 @@ func newRouter(
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger(log))
 	r.Use(middleware.Recoverer(log))
+	r.Use(middleware.SecureHeaders(cfg.IsProduction()))
+	r.Use(middleware.MaxBodyBytes(maxRequestBodyBytes))
 	r.Use(chiMiddleware.Timeout(cfg.RequestTimeout))
 	r.Use(corsHandler)
 
@@ -222,19 +256,21 @@ func newRouter(
 	})
 
 	// ── API routes ────────────────────────────────────────────────────────
-	// Each handler owns its own group. requireAuth is passed at the mount site,
-	// so which groups are guarded is visible in these two lines.
-	r.Mount("/api/auth", authH.Routes())
-	r.Mount("/api/links", links.Routes(requireAuth))
+	// Each handler owns its own group. rateLimitAuth (per IP) throttles the
+	// public auth endpoints; requireAuth guards the whole links group and
+	// rateLimitCreate (per user) throttles POST within it. Which routes are
+	// protected and which are throttled is visible in these two lines.
+	r.Mount("/api/auth", d.auth.Routes(d.rateLimitAuth))
+	r.Mount("/api/links", d.link.Routes(d.requireAuth, d.rateLimitCreate))
 
 	// ── Health ────────────────────────────────────────────────────────────
-	r.Get("/healthz", health.Live)
-	r.Get("/readyz", health.Ready)
+	r.Get("/healthz", d.health.Live)
+	r.Get("/readyz", d.health.Ready)
 
 	// ── Redirect (public, hot path) ───────────────────────────────────────
 	// Registered last, at the root. domain's reserved-alias list keeps a custom
 	// alias from ever shadowing /api, /healthz or /readyz.
-	r.Get("/{code}", links.Redirect)
+	r.Get("/{code}", d.link.Redirect)
 
 	return r
 }

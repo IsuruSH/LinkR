@@ -10,9 +10,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// keyPrefix is versioned. If Entry ever gains a field, bumping v1 to v2 rolls
-// the whole namespace rather than trying to decode old values with a new shape.
-const keyPrefix = "linkr:link:v1:"
+// keyPrefix is versioned. Entry gained ExpiresAt in M2, so this is v2: old v1
+// values (which lack the field) are simply never read and expire out, rather
+// than being decoded into a new shape that silently treats them as non-expiring.
+const keyPrefix = "linkr:link:v2:"
 
 // negativeSentinel marks "this code does not exist". An empty string is a value
 // Redis stores happily and that Entry can never legitimately serialize to, so

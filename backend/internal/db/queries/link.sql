@@ -2,8 +2,9 @@
 -- No SELECT-then-INSERT: we insert and let links_short_code_key reject a
 -- collision. The repository turns 23505 into ErrAliasTaken, and the service
 -- retries with a fresh code when the alias was generated rather than chosen.
-INSERT INTO links (user_id, short_code, long_url)
-VALUES (@user_id, @short_code, @long_url)
+-- expires_at is nullable; NULL means the link never expires.
+INSERT INTO links (user_id, short_code, long_url, expires_at)
+VALUES (@user_id, @short_code, @long_url, @expires_at)
 RETURNING *;
 
 -- name: GetLinkByShortCode :one

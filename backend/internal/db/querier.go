@@ -20,6 +20,7 @@ type Querier interface {
 	// No SELECT-then-INSERT: we insert and let links_short_code_key reject a
 	// collision. The repository turns 23505 into ErrAliasTaken, and the service
 	// retries with a fresh code when the alias was generated rather than chosen.
+	// expires_at is nullable; NULL means the link never expires.
 	CreateLink(ctx context.Context, arg CreateLinkParams) (Link, error)
 	// The UNIQUE index on email is the duplicate check. Racing registrations both
 	// reach here; one gets 23505, which the repository maps to ErrEmailTaken.

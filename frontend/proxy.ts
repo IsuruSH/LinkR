@@ -26,12 +26,25 @@ const SESSION_COOKIE = "linkr_session";
 
 const PUBLIC_ROUTES = ["/login", "/register"];
 
+// Auth pages a signed-in user should be bounced away from. The /l/ link-status
+// pages (expired / not-found) are public too, but a signed-in user may legitimately
+// land on them, so they are not in this set.
+function isAuthPage(pathname: string): boolean {
+  return PUBLIC_ROUTES.includes(pathname);
+}
+
+// Pages reachable without a session. The backend redirects browsers here when a
+// short link is missing or expired, so a logged-out visitor must not be bounced
+// to /login.
+function isPublicPage(pathname: string): boolean {
+  return isAuthPage(pathname) || pathname.startsWith("/l/");
+}
+
 export default function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const hasSession = req.cookies.has(SESSION_COOKIE);
-  const isPublicRoute = PUBLIC_ROUTES.includes(pathname);
 
-  if (!hasSession && !isPublicRoute) {
+  if (!hasSession && !isPublicPage(pathname)) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
     // Remember where they were headed, so login can send them back there
@@ -43,7 +56,7 @@ export default function proxy(req: NextRequest) {
   }
 
   // An authenticated user has no business on the login page.
-  if (hasSession && isPublicRoute) {
+  if (hasSession && isAuthPage(pathname)) {
     const url = req.nextUrl.clone();
     url.pathname = "/dashboard/links";
     url.search = "";

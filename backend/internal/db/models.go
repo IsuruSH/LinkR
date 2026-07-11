@@ -25,6 +25,7 @@ type Link struct {
 	LongUrl    string
 	ClickCount int64
 	CreatedAt  time.Time
+	ExpiresAt  *time.Time
 }
 
 type User struct {

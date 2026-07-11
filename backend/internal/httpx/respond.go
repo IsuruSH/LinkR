@@ -42,8 +42,10 @@ var statusByCode = map[domain.Code]int{
 	domain.CodeNotFound:           http.StatusNotFound,
 	domain.CodeMethodNotAllowed:   http.StatusMethodNotAllowed,
 	domain.CodeLinkNotFound:       http.StatusNotFound,
+	domain.CodeLinkExpired:        http.StatusGone,
 	domain.CodeAliasTaken:         http.StatusConflict,
 	domain.CodeEmailTaken:         http.StatusConflict,
+	domain.CodeRateLimited:        http.StatusTooManyRequests,
 	domain.CodeInternal:           http.StatusInternalServerError,
 	domain.CodeCodeGeneration:     http.StatusInternalServerError,
 }
@@ -99,10 +101,18 @@ func writeEnvelope(w http.ResponseWriter, status int, body errorBody) {
 
 // Decode reads a JSON request body, rejecting unknown fields so a typo'd field
 // name fails loudly instead of being silently ignored.
+//
+// The body is expected to already be wrapped by the MaxBodyBytes middleware; a
+// body over that cap surfaces here as a *http.MaxBytesError, which is mapped to
+// a clean 400 rather than the generic "invalid JSON".
 func Decode(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return domain.WrapError(err, domain.CodeValidation, "request body is too large")
+		}
 		return domain.WrapError(err, domain.CodeValidation, "request body is not valid JSON")
 	}
 	return nil

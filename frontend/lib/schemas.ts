@@ -50,6 +50,15 @@ export const createLinkSchema = z.object({
       message: "3–32 characters: letters, digits, hyphen or underscore",
     })
     .optional(),
+  // A <input type="datetime-local"> yields "YYYY-MM-DDTHH:mm" in LOCAL time, or
+  // "" when untouched. Validated here as "in the future"; the server re-checks
+  // and is the authority. The dialog converts it to an ISO instant before send.
+  expiresAt: z
+    .string()
+    .optional()
+    .refine((value) => !value || new Date(value).getTime() > Date.now(), {
+      message: "Expiry must be in the future",
+    }),
 });
 
 export type CreateLinkInput = z.infer<typeof createLinkSchema>;

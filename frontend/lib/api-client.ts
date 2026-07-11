@@ -33,13 +33,17 @@ client.interceptors.response.use(
 export interface CreateLinkInput {
   url: string;
   alias?: string;
+  /** RFC3339 instant, or omitted for a link that never expires. */
+  expires_at?: string;
 }
 
 export const api = {
   async createLink(input: CreateLinkInput): Promise<Link> {
-    // Send `alias` only when non-empty: the backend rejects unknown fields and
-    // treats "" as "generate one for me", but omitting is the clearer contract.
-    const body: CreateLinkInput = input.alias ? input : { url: input.url };
+    // Send only the fields that are set. The backend rejects unknown fields, and
+    // omitting is a clearer contract than sending empty strings.
+    const body: CreateLinkInput = { url: input.url };
+    if (input.alias) body.alias = input.alias;
+    if (input.expires_at) body.expires_at = input.expires_at;
     const { data } = await client.post<Link>("/links", body);
     return data;
   },
@@ -71,6 +75,8 @@ export const api = {
  */
 export const queryKeys = {
   links: ["links"] as const,
-  list: (limit: number) => ["links", "list", limit] as const,
+  // Each page is cached under its own cursor, so navigating Back is instant and
+  // a create/delete invalidates the whole `links` prefix regardless of page.
+  list: (limit: number, cursor: string | null) => ["links", "list", limit, cursor] as const,
   stats: (code: string, range: StatsRange) => ["links", "stats", code, range] as const,
 };

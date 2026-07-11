@@ -23,6 +23,13 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -33,56 +40,97 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
-import { useDeleteLink, useLinks } from "@/hooks/use-links";
+import { useDeleteLink, usePagedLinks } from "@/hooks/use-links";
 import { toApiError } from "@/lib/api-error";
 import type { Link } from "@/types/api";
 
 export function LinksTable() {
-  const { data, isPending, isError, error, refetch, isRefetching, fetchNextPage, hasNextPage, isFetchingNextPage } =
-    useLinks();
+  const { query, page, hasNext, hasPrev, goNext, goPrev, resetToFirstPage } = usePagedLinks();
+  const { data, isPending, isError, error, refetch, isRefetching, isPlaceholderData } = query;
 
   if (isPending) return <TableSkeleton />;
-  if (isError) return <ErrorState message={toApiError(error).message} onRetry={() => void refetch()} isRetrying={isRefetching} />;
+  if (isError) {
+    return (
+      <ErrorState
+        message={toApiError(error).message}
+        onRetry={() => void refetch()}
+        isRetrying={isRefetching}
+      />
+    );
+  }
 
-  const links = data.links;
-  if (links.length === 0) return <EmptyState />;
+  const links = data.items;
+  // Empty page 1 is a genuine empty state; an empty later page means a stale
+  // cursor (e.g. the last row was deleted) — send them back to the start.
+  if (links.length === 0) {
+    return page > 1 ? <StaleEmptyPage onBack={resetToFirstPage} /> : <EmptyState />;
+  }
 
   return (
     <div className="space-y-4">
       <div className="rounded-lg border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="w-[220px]">Short link</TableHead>
-              <TableHead>Destination</TableHead>
-              <TableHead className="w-[110px] text-right">Clicks</TableHead>
-              <TableHead className="w-[130px]">Created</TableHead>
-              <TableHead className="w-[60px]">
-                <span className="sr-only">Actions</span>
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {links.map((link) => (
-              <LinkRow key={link.short_code} link={link} />
-            ))}
-          </TableBody>
-        </Table>
+        {/* Dim while the next/prev page loads, so the transition reads as a
+            change rather than a flash. */}
+        <div className={isPlaceholderData ? "opacity-60 transition-opacity" : "transition-opacity"}>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[220px]">Short link</TableHead>
+                <TableHead>Destination</TableHead>
+                <TableHead className="w-[110px] text-right">Clicks</TableHead>
+                <TableHead className="w-[130px]">Created</TableHead>
+                <TableHead className="w-[130px]">Expires</TableHead>
+                <TableHead className="w-[60px]">
+                  <span className="sr-only">Actions</span>
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {links.map((link) => (
+                // `now` is the query's fetch time, a pure value — evaluating expiry
+                // as of the data's freshness, and keeping render free of Date.now().
+                <LinkRow
+                  key={link.short_code}
+                  link={link}
+                  now={query.dataUpdatedAt}
+                  onDeleted={resetToFirstPage}
+                />
+              ))}
+            </TableBody>
+          </Table>
+        </div>
       </div>
 
-      {hasNextPage && (
-        <div className="flex justify-center">
-          <Button variant="outline" onClick={() => void fetchNextPage()} disabled={isFetchingNextPage}>
-            {isFetchingNextPage && <Loader2 className="size-4 animate-spin" aria-hidden />}
-            {isFetchingNextPage ? "Loading…" : "Load more"}
-          </Button>
-        </div>
+      {(hasPrev || hasNext) && (
+        <Pagination>
+          <PaginationContent className="w-full justify-between">
+            <PaginationItem>
+              <PaginationPrevious
+                onClick={goPrev}
+                aria-disabled={!hasPrev}
+                className={!hasPrev ? "pointer-events-none opacity-50" : "cursor-pointer"}
+              />
+            </PaginationItem>
+
+            <PaginationItem>
+              <span className="text-muted-foreground text-sm">Page {page}</span>
+            </PaginationItem>
+
+            <PaginationItem>
+              <PaginationNext
+                onClick={goNext}
+                aria-disabled={!hasNext}
+                className={!hasNext ? "pointer-events-none opacity-50" : "cursor-pointer"}
+              />
+            </PaginationItem>
+          </PaginationContent>
+        </Pagination>
       )}
     </div>
   );
 }
 
-function LinkRow({ link }: { link: Link }) {
+function LinkRow({ link, now, onDeleted }: { link: Link; now: number; onDeleted: () => void }) {
   const { copy, copiedValue } = useCopyToClipboard();
   const deleteLink = useDeleteLink();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -141,6 +189,10 @@ function LinkRow({ link }: { link: Link }) {
         {formatDate(link.created_at)}
       </TableCell>
 
+      <TableCell className="text-sm">
+        <ExpiryCell expiresAt={link.expires_at} now={now} />
+      </TableCell>
+
       <TableCell>
         <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
@@ -158,7 +210,7 @@ function LinkRow({ link }: { link: Link }) {
             <DropdownMenuItem
               variant="destructive"
               disabled={deleteLink.isPending}
-              onClick={() => deleteLink.mutate(link.short_code)}
+              onClick={() => deleteLink.mutate(link.short_code, { onSuccess: onDeleted })}
             >
               <Trash2 className="size-4" aria-hidden />
               Delete
@@ -184,6 +236,7 @@ function TableSkeleton() {
             <TableHead>Destination</TableHead>
             <TableHead className="w-[110px] text-right">Clicks</TableHead>
             <TableHead className="w-[130px]">Created</TableHead>
+            <TableHead className="w-[130px]">Expires</TableHead>
             <TableHead className="w-[60px]" />
           </TableRow>
         </TableHeader>
@@ -193,6 +246,7 @@ function TableSkeleton() {
               <TableCell><Skeleton className="h-5 w-28" /></TableCell>
               <TableCell><Skeleton className="h-5 w-full max-w-sm" /></TableCell>
               <TableCell className="flex justify-end"><Skeleton className="h-5 w-10" /></TableCell>
+              <TableCell><Skeleton className="h-5 w-20" /></TableCell>
               <TableCell><Skeleton className="h-5 w-20" /></TableCell>
               <TableCell><Skeleton className="size-8 rounded-md" /></TableCell>
             </TableRow>
@@ -215,6 +269,22 @@ function EmptyState() {
         Create your first short link and every click on it will show up here.
       </p>
       <CreateLinkDialog />
+    </div>
+  );
+}
+
+/**
+ * Shown when a later page comes back empty — the cursor outlived its data (the
+ * last row was deleted). Rather than strand the user on a blank page, offer the
+ * way back to the start.
+ */
+function StaleEmptyPage({ onBack }: { onBack: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed px-6 py-16 text-center">
+      <p className="text-muted-foreground mb-4 text-sm">There&apos;s nothing on this page anymore.</p>
+      <Button variant="outline" onClick={onBack}>
+        Back to the first page
+      </Button>
     </div>
   );
 }
@@ -245,6 +315,26 @@ function ErrorState({
       </Button>
     </div>
   );
+}
+
+/**
+ * The expiry cell has three states: never (the common case), a future date, and
+ * expired. Expired gets a destructive badge because the link no longer resolves —
+ * the dashboard should not look identical for a working link and a dead one.
+ */
+function ExpiryCell({ expiresAt, now }: { expiresAt: string | null; now: number }) {
+  if (!expiresAt) {
+    return <span className="text-muted-foreground">Never</span>;
+  }
+  if (new Date(expiresAt).getTime() <= now) {
+    return (
+      <Badge variant="outline" className="border-destructive/40 text-destructive gap-1">
+        <TriangleAlert className="size-3" aria-hidden />
+        Expired
+      </Badge>
+    );
+  }
+  return <span className="text-muted-foreground">{formatDate(expiresAt)}</span>;
 }
 
 /**

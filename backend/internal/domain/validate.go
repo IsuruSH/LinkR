@@ -5,12 +5,36 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 )
 
 // MaxURLLength matches the de-facto browser ceiling. Beyond this a redirect is
 // useless anyway, and an unbounded field is an invitation to fill the table.
 const MaxURLLength = 2048
+
+// MaxExpiryHorizon caps how far in the future a link may be set to expire. Ten
+// years is effectively "never" for a short link, and an unbounded value is more
+// likely a client bug (a millisecond timestamp mistaken for seconds) than intent.
+const MaxExpiryHorizon = 10 * 365 * 24 * time.Hour
+
+// ValidateExpiry checks a requested expiry against now. A nil expiry is valid and
+// means the link never expires. The expiry must be in the future — a link that is
+// born expired is a client mistake, not a feature — and within the horizon.
+func ValidateExpiry(expiresAt *time.Time, now time.Time) error {
+	if expiresAt == nil {
+		return nil
+	}
+	if !expiresAt.After(now) {
+		return NewError(CodeValidation, "expiry must be in the future").
+			WithDetails(map[string]string{"expires_at": "must be a future time"})
+	}
+	if expiresAt.After(now.Add(MaxExpiryHorizon)) {
+		return NewError(CodeValidation, "expiry is too far in the future").
+			WithDetails(map[string]string{"expires_at": "must be within 10 years"})
+	}
+	return nil
+}
 
 var aliasPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{3,32}$`)
 

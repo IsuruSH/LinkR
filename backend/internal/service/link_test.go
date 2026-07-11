@@ -119,7 +119,7 @@ func newFakeLinkRepo() *fakeLinkRepo {
 	return &fakeLinkRepo{links: map[string]domain.Link{}, takenCodes: map[string]int{}}
 }
 
-func (f *fakeLinkRepo) Create(_ context.Context, userID uuid.UUID, code, longURL string) (domain.Link, error) {
+func (f *fakeLinkRepo) Create(_ context.Context, userID uuid.UUID, code, longURL string, _ *time.Time) (domain.Link, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createCalls++
@@ -244,7 +244,7 @@ func TestResolve_MissFillsCache(t *testing.T) {
 	t.Parallel()
 
 	repo, c := newFakeLinkRepo(), newFakeCache()
-	link, _ := repo.Create(context.Background(), uuid.New(), "abc1234", "https://example.com")
+	link, _ := repo.Create(context.Background(), uuid.New(), "abc1234", "https://example.com", nil)
 
 	svc := newTestService(repo, c, &fakeRecorder{})
 
@@ -275,7 +275,7 @@ func TestResolve_CachedEntryCarriesLinkID(t *testing.T) {
 	t.Parallel()
 
 	repo, c := newFakeLinkRepo(), newFakeCache()
-	link, _ := repo.Create(context.Background(), uuid.New(), "abc1234", "https://example.com")
+	link, _ := repo.Create(context.Background(), uuid.New(), "abc1234", "https://example.com", nil)
 
 	svc := newTestService(repo, c, &fakeRecorder{})
 	if _, err := svc.Resolve(context.Background(), "abc1234"); err != nil {
@@ -327,7 +327,7 @@ func TestResolve_DegradesToPostgresWhenCacheErrors(t *testing.T) {
 	t.Parallel()
 
 	repo, c := newFakeLinkRepo(), newFakeCache()
-	link, _ := repo.Create(context.Background(), uuid.New(), "abc1234", "https://example.com")
+	link, _ := repo.Create(context.Background(), uuid.New(), "abc1234", "https://example.com", nil)
 	c.getErr = errors.New("dial tcp 127.0.0.1:6379: connect: connection refused")
 
 	svc := newTestService(repo, c, &fakeRecorder{})
@@ -349,7 +349,7 @@ func TestDelete_InvalidatesCache(t *testing.T) {
 	ctx := context.Background()
 	repo, c := newFakeLinkRepo(), newFakeCache()
 	userID := uuid.New()
-	link, _ := repo.Create(ctx, userID, "abc1234", "https://example.com")
+	link, _ := repo.Create(ctx, userID, "abc1234", "https://example.com", nil)
 
 	svc := newTestService(repo, c, &fakeRecorder{})
 
@@ -400,7 +400,7 @@ func TestDelete_ReportsInvalidationFailure(t *testing.T) {
 	ctx := context.Background()
 	repo, c := newFakeLinkRepo(), newFakeCache()
 	userID := uuid.New()
-	if _, err := repo.Create(ctx, userID, "abc1234", "https://example.com"); err != nil {
+	if _, err := repo.Create(ctx, userID, "abc1234", "https://example.com", nil); err != nil {
 		t.Fatal(err)
 	}
 	c.invalidateErr = errors.New("redis: connection refused")
@@ -419,7 +419,7 @@ func TestCreate_RejectsInvalidURLBeforeTouchingTheDatabase(t *testing.T) {
 	repo := newFakeLinkRepo()
 	svc := newTestService(repo, newFakeCache(), &fakeRecorder{})
 
-	_, err := svc.Create(context.Background(), uuid.New(), "javascript:alert(1)", "")
+	_, err := svc.Create(context.Background(), uuid.New(), "javascript:alert(1)", "", nil)
 	if err == nil {
 		t.Fatal("Create accepted a javascript: URL")
 	}
@@ -435,12 +435,12 @@ func TestCreate_TakenAliasIsAConflict(t *testing.T) {
 
 	ctx := context.Background()
 	repo := newFakeLinkRepo()
-	if _, err := repo.Create(ctx, uuid.New(), "my-link", "https://other.example"); err != nil {
+	if _, err := repo.Create(ctx, uuid.New(), "my-link", "https://other.example", nil); err != nil {
 		t.Fatal(err)
 	}
 
 	svc := newTestService(repo, newFakeCache(), &fakeRecorder{})
-	_, err := svc.Create(ctx, uuid.New(), "https://example.com", "my-link")
+	_, err := svc.Create(ctx, uuid.New(), "https://example.com", "my-link", nil)
 	if !errors.Is(err, domain.ErrAliasTaken) {
 		t.Fatalf("error = %v, want ErrAliasTaken", err)
 	}
@@ -450,7 +450,7 @@ func TestCreate_RejectsReservedAlias(t *testing.T) {
 	t.Parallel()
 
 	svc := newTestService(newFakeLinkRepo(), newFakeCache(), &fakeRecorder{})
-	_, err := svc.Create(context.Background(), uuid.New(), "https://example.com", "healthz")
+	_, err := svc.Create(context.Background(), uuid.New(), "https://example.com", "healthz", nil)
 
 	var derr *domain.Error
 	if !errors.As(err, &derr) || derr.Code != domain.CodeReservedAlias {
@@ -466,7 +466,7 @@ func TestCreate_RetriesGeneratedCodeOnCollision(t *testing.T) {
 	repo.takenCodes["*"] = 2 // the first two generated codes collide
 
 	svc := newTestService(repo, newFakeCache(), &fakeRecorder{})
-	link, err := svc.Create(context.Background(), uuid.New(), "https://example.com", "")
+	link, err := svc.Create(context.Background(), uuid.New(), "https://example.com", "", nil)
 	if err != nil {
 		t.Fatalf("Create should have retried past the collisions: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestCreate_GivesUpAfterMaxAttempts(t *testing.T) {
 	repo.takenCodes["*"] = 1000 // every code collides
 
 	svc := newTestService(repo, newFakeCache(), &fakeRecorder{})
-	_, err := svc.Create(context.Background(), uuid.New(), "https://example.com", "")
+	_, err := svc.Create(context.Background(), uuid.New(), "https://example.com", "", nil)
 
 	var derr *domain.Error
 	if !errors.As(err, &derr) || derr.Code != domain.CodeCodeGeneration {

@@ -13,22 +13,29 @@ import (
 )
 
 const createLink = `-- name: CreateLink :one
-INSERT INTO links (user_id, short_code, long_url)
-VALUES ($1, $2, $3)
-RETURNING id, user_id, short_code, long_url, click_count, created_at
+INSERT INTO links (user_id, short_code, long_url, expires_at)
+VALUES ($1, $2, $3, $4)
+RETURNING id, user_id, short_code, long_url, click_count, created_at, expires_at
 `
 
 type CreateLinkParams struct {
 	UserID    uuid.UUID
 	ShortCode string
 	LongUrl   string
+	ExpiresAt *time.Time
 }
 
 // No SELECT-then-INSERT: we insert and let links_short_code_key reject a
 // collision. The repository turns 23505 into ErrAliasTaken, and the service
 // retries with a fresh code when the alias was generated rather than chosen.
+// expires_at is nullable; NULL means the link never expires.
 func (q *Queries) CreateLink(ctx context.Context, arg CreateLinkParams) (Link, error) {
-	row := q.db.QueryRow(ctx, createLink, arg.UserID, arg.ShortCode, arg.LongUrl)
+	row := q.db.QueryRow(ctx, createLink,
+		arg.UserID,
+		arg.ShortCode,
+		arg.LongUrl,
+		arg.ExpiresAt,
+	)
 	var i Link
 	err := row.Scan(
 		&i.ID,
@@ -37,6 +44,7 @@ func (q *Queries) CreateLink(ctx context.Context, arg CreateLinkParams) (Link, e
 		&i.LongUrl,
 		&i.ClickCount,
 		&i.CreatedAt,
+		&i.ExpiresAt,
 	)
 	return i, err
 }
@@ -62,7 +70,7 @@ func (q *Queries) DeleteLinkByShortCode(ctx context.Context, arg DeleteLinkBySho
 }
 
 const getLinkByShortCode = `-- name: GetLinkByShortCode :one
-SELECT id, user_id, short_code, long_url, click_count, created_at FROM links WHERE short_code = $1
+SELECT id, user_id, short_code, long_url, click_count, created_at, expires_at FROM links WHERE short_code = $1
 `
 
 // The redirect hot path, on cache miss only.
@@ -76,12 +84,13 @@ func (q *Queries) GetLinkByShortCode(ctx context.Context, shortCode string) (Lin
 		&i.LongUrl,
 		&i.ClickCount,
 		&i.CreatedAt,
+		&i.ExpiresAt,
 	)
 	return i, err
 }
 
 const getLinkByShortCodeForUser = `-- name: GetLinkByShortCodeForUser :one
-SELECT id, user_id, short_code, long_url, click_count, created_at FROM links WHERE short_code = $1 AND user_id = $2
+SELECT id, user_id, short_code, long_url, click_count, created_at, expires_at FROM links WHERE short_code = $1 AND user_id = $2
 `
 
 type GetLinkByShortCodeForUserParams struct {
@@ -102,12 +111,13 @@ func (q *Queries) GetLinkByShortCodeForUser(ctx context.Context, arg GetLinkBySh
 		&i.LongUrl,
 		&i.ClickCount,
 		&i.CreatedAt,
+		&i.ExpiresAt,
 	)
 	return i, err
 }
 
 const listLinksAfter = `-- name: ListLinksAfter :many
-SELECT id, user_id, short_code, long_url, click_count, created_at FROM links
+SELECT id, user_id, short_code, long_url, click_count, created_at, expires_at FROM links
 WHERE user_id = $1
   AND (created_at, id) < ($2::timestamptz, $3::uuid)
 ORDER BY created_at DESC, id DESC
@@ -145,6 +155,7 @@ func (q *Queries) ListLinksAfter(ctx context.Context, arg ListLinksAfterParams) 
 			&i.LongUrl,
 			&i.ClickCount,
 			&i.CreatedAt,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -157,7 +168,7 @@ func (q *Queries) ListLinksAfter(ctx context.Context, arg ListLinksAfterParams) 
 }
 
 const listLinksFirstPage = `-- name: ListLinksFirstPage :many
-SELECT id, user_id, short_code, long_url, click_count, created_at FROM links
+SELECT id, user_id, short_code, long_url, click_count, created_at, expires_at FROM links
 WHERE user_id = $1
 ORDER BY created_at DESC, id DESC
 LIMIT $2
@@ -189,6 +200,7 @@ func (q *Queries) ListLinksFirstPage(ctx context.Context, arg ListLinksFirstPage
 			&i.LongUrl,
 			&i.ClickCount,
 			&i.CreatedAt,
+			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}

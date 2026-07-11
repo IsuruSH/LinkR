@@ -19,7 +19,7 @@ import (
 // LinkRepo is the persistence surface the link service needs. Declared here,
 // in the consumer, so the repository can grow methods this package never sees.
 type LinkRepo interface {
-	Create(ctx context.Context, userID uuid.UUID, shortCode, longURL string) (domain.Link, error)
+	Create(ctx context.Context, userID uuid.UUID, shortCode, longURL string, expiresAt *time.Time) (domain.Link, error)
 	GetByShortCode(ctx context.Context, code string) (domain.Link, error)
 	GetByShortCodeForUser(ctx context.Context, userID uuid.UUID, code string) (domain.Link, error)
 	DeleteByShortCode(ctx context.Context, userID uuid.UUID, code string) error
@@ -67,9 +67,12 @@ func NewLinkService(
 // The two paths differ in how they treat a duplicate: a user-chosen alias that
 // is taken is a 409 the user must resolve, while a generated code that collides
 // is our problem and we simply try again.
-func (s *LinkService) Create(ctx context.Context, userID uuid.UUID, rawURL, alias string) (domain.Link, error) {
+func (s *LinkService) Create(ctx context.Context, userID uuid.UUID, rawURL, alias string, expiresAt *time.Time) (domain.Link, error) {
 	longURL, err := domain.ValidateLongURL(rawURL)
 	if err != nil {
+		return domain.Link{}, err
+	}
+	if err := domain.ValidateExpiry(expiresAt, time.Now().UTC()); err != nil {
 		return domain.Link{}, err
 	}
 
@@ -77,7 +80,7 @@ func (s *LinkService) Create(ctx context.Context, userID uuid.UUID, rawURL, alia
 		if err := domain.ValidateAlias(alias); err != nil {
 			return domain.Link{}, err
 		}
-		link, err := s.links.Create(ctx, userID, alias, longURL)
+		link, err := s.links.Create(ctx, userID, alias, longURL, expiresAt)
 		if err != nil {
 			return domain.Link{}, err // ErrAliasTaken surfaces as 409
 		}
@@ -90,7 +93,7 @@ func (s *LinkService) Create(ctx context.Context, userID uuid.UUID, rawURL, alia
 			return domain.Link{}, err
 		}
 
-		link, err := s.links.Create(ctx, userID, code, longURL)
+		link, err := s.links.Create(ctx, userID, code, longURL, expiresAt)
 		if err == nil {
 			return link, nil
 		}
@@ -114,12 +117,21 @@ func (s *LinkService) Create(ctx context.Context, userID uuid.UUID, rawURL, alia
 // beats a broken one. /readyz reports the cache as unhealthy so the replica is
 // pulled from rotation, but in-flight requests still get served.
 func (s *LinkService) Resolve(ctx context.Context, code string) (cache.Entry, error) {
+	now := time.Now().UTC()
+
 	entry, lookup, err := s.cache.GetLink(ctx, code)
 	switch {
 	case err != nil:
 		s.logger.WarnContext(ctx, "cache read failed, falling back to postgres",
 			"error", err, "code", code)
 	case lookup == cache.Hit:
+		// A cache hit still has to honour expiry. The entry carries ExpiresAt
+		// precisely so this check needs no Postgres read. The TTL clamp on fill
+		// makes serving-an-expired-hit rare, but clock skew or a link edited to
+		// expire sooner can still land here.
+		if entryExpired(entry, now) {
+			return cache.Entry{}, domain.ErrLinkExpired
+		}
 		return entry, nil
 	case lookup == cache.Negative:
 		// Postgres said "no such code" recently. Answer without asking again.
@@ -136,9 +148,24 @@ func (s *LinkService) Resolve(ctx context.Context, code string) (cache.Entry, er
 		return cache.Entry{}, err
 	}
 
-	e := cache.Entry{LinkID: link.ID, LongURL: link.LongURL}
-	s.cacheFill(ctx, code, e)
+	if link.IsExpired(now) {
+		// Deliberately NOT negative-cached. The negative cache blocks enumeration
+		// of random nonexistent codes; an expired link is a known code with
+		// bounded traffic. Caching it as "missing" would also flip the client's
+		// error from 410 Expired to 404 Not-Found on the second hit — losing the
+		// distinction the friendly page depends on. The cost is a Postgres point
+		// lookup (indexed) per hit to a dead link, which is acceptable.
+		return cache.Entry{}, domain.ErrLinkExpired
+	}
+
+	e := cache.Entry{LinkID: link.ID, LongURL: link.LongURL, ExpiresAt: link.ExpiresAt}
+	s.cacheFill(ctx, code, e, now)
 	return e, nil
+}
+
+// entryExpired mirrors domain.Link.IsExpired for a cache Entry.
+func entryExpired(e cache.Entry, now time.Time) bool {
+	return e.ExpiresAt != nil && !now.Before(*e.ExpiresAt)
 }
 
 // RecordClick hands the event to the worker. It never blocks and never errors:
@@ -225,11 +252,31 @@ func (s *LinkService) Stats(ctx context.Context, userID uuid.UUID, code string, 
 	}, nil
 }
 
-func (s *LinkService) cacheFill(ctx context.Context, code string, e cache.Entry) {
-	if err := s.cache.SetLink(ctx, code, e, s.cacheTTL); err != nil {
+func (s *LinkService) cacheFill(ctx context.Context, code string, e cache.Entry, now time.Time) {
+	ttl := effectiveCacheTTL(s.cacheTTL, e.ExpiresAt, now)
+	if ttl <= 0 {
+		// The link expires within the current instant. Nothing to cache.
+		return
+	}
+	if err := s.cache.SetLink(ctx, code, e, ttl); err != nil {
 		// A failed fill costs a Postgres read next time. Not worth failing on.
 		s.logger.WarnContext(ctx, "cache fill failed", "error", err, "code", code)
 	}
+}
+
+// effectiveCacheTTL clamps the cache TTL so a cached entry can never outlive the
+// link. Without this, a link expiring in 5 minutes with a 24h cache TTL would
+// keep redirecting for 24h after its death. Returns the base TTL for a link that
+// never expires.
+func effectiveCacheTTL(base time.Duration, expiresAt *time.Time, now time.Time) time.Duration {
+	if expiresAt == nil {
+		return base
+	}
+	untilExpiry := expiresAt.Sub(now)
+	if untilExpiry < base {
+		return untilExpiry
+	}
+	return base
 }
 
 func (s *LinkService) cacheMissing(ctx context.Context, code string) {

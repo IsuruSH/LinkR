@@ -18,9 +18,13 @@ func NewAuthHandler(svc *service.AuthService) *AuthHandler {
 }
 
 // Routes returns the /api/auth group. Both routes are public by definition:
-// you cannot present a token before you have one.
-func (h *AuthHandler) Routes() chi.Router {
+// you cannot present a token before you have one — which is exactly why they are
+// the brute-force surface, so rateLimit (per IP, nil when disabled) guards them.
+func (h *AuthHandler) Routes(rateLimit func(http.Handler) http.Handler) chi.Router {
 	r := chi.NewRouter()
+	if rateLimit != nil {
+		r.Use(rateLimit)
+	}
 
 	r.Post("/register", h.Register)
 	r.Post("/login", h.Login)

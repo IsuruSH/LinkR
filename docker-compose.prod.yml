@@ -1,0 +1,161 @@
+# Production stack for a single host (EC2). One command:
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Nginx is the ONLY service that publishes ports. The app, database and cache are
+# reachable only on the internal linkr_net network. All configuration comes from
+# the single root .env; values that must reference container hostnames (the DB
+# URL) or must differ in production (APP_ENV) are DERIVED here, not duplicated in
+# .env. The operator sets one public URL — APP_ORIGIN — and it fans out below.
+
+name: linkr
+
+# Shared log cap so a long-running host cannot fill its disk with container logs.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ── Reverse proxy — the only public service ────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      frontend: {condition: service_healthy}
+      backend: {condition: service_healthy}
+    ports:
+      - "80:80"
+      - "443:443" # pre-mapped; nothing listens until TLS is enabled in nginx.conf
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_logs:/var/log/nginx
+      # Future HTTPS: certbot writes the challenge + certs into these volumes and
+      # nginx reads them. Mounting now means enabling TLS is an nginx.conf change,
+      # not a compose change.
+      - certbot_webroot:/var/www/certbot:ro
+      - letsencrypt:/etc/letsencrypt:ro
+    healthcheck:
+      # Hits the self-answered /__nginx_health, so Nginx reports on itself rather
+      # than on an upstream. busybox wget ships in nginx:alpine.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/__nginx_health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [linkr_net]
+
+  # ── Frontend (Next.js) — internal only ─────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # NEXT_PUBLIC_* is inlined into the client bundle at BUILD time, so the
+        # public origin must be present here. Same value as the runtime var below
+        # — that is Next's build/runtime split, not a duplicated setting.
+        NEXT_PUBLIC_API_URL: ${APP_ORIGIN:?set APP_ORIGIN in .env}
+    env_file: [.env]
+    environment:
+      NEXT_PUBLIC_API_URL: ${APP_ORIGIN}
+      # The Next SERVER reaches the backend for the BFF hop over the internal
+      # network; "localhost" inside this container would be the frontend itself.
+      BACKEND_INTERNAL_URL: http://backend:8080
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/login"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [linkr_net]
+
+  # ── Backend (Go) — internal only, horizontally scalable ────────────────
+  backend:
+    build:
+      context: ./backend
+    # Horizontal scale. Compose v2 honours deploy.replicas on `docker compose up`.
+    # Safe because the backend is stateless and migrations take a Postgres
+    # advisory lock (one replica applies, the rest no-op). Nginx load-balances
+    # across them via the dynamic `resolve` upstream. Default 1; set
+    # BACKEND_REPLICAS=3 in .env (or inline) to scale. Must NOT publish a host
+    # port (it doesn't) or replicas would collide.
+    deploy:
+      replicas: ${BACKEND_REPLICAS:-1}
+    env_file: [.env]
+    environment:
+      # Derived from POSTGRES_* + service names — cannot live literally in .env.
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      # Production overrides. APP_ORIGIN is the single public URL the operator set.
+      APP_ENV: production
+      PUBLIC_BASE_URL: ${APP_ORIGIN}       # short links render as APP_ORIGIN/{code}
+      APP_URL: ${APP_ORIGIN}               # expired/missing links bounce here
+      CORS_ALLOWED_ORIGINS: ${APP_ORIGIN}
+      # Behind Nginx now: read the real client IP from X-Forwarded-For for the
+      # per-IP auth rate limiting. Nginx sets and the app trusts it.
+      TRUST_PROXY_HEADERS: "true"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      # distroless has no shell or curl, so the binary probes itself.
+      test: ["CMD", "/server", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [linkr_net]
+
+  # ── PostgreSQL — internal only, persistent ─────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    env_file: [.env]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [linkr_net]
+
+  # ── Redis — internal only, persistent ──────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    env_file: [.env]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [linkr_net]
+
+volumes:
+  postgres_data:
+  redis_data:
+  nginx_logs:
+  certbot_webroot:
+  letsencrypt:
+
+networks:
+  linkr_net:
+    driver: bridge

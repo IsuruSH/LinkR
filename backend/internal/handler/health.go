@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/IsuruSh/linkr/internal/httpx"
@@ -47,17 +48,29 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
 	defer cancel()
 
+	// The two probes are independent network round-trips, so overlap them: the
+	// endpoint's latency becomes max(postgres, redis) instead of their sum, which
+	// matters when a dependency is slow-but-alive and an orchestrator is polling
+	// this every few seconds. Race-free by construction — each goroutine writes
+	// its own variable and wg.Wait happens-before the reads.
+	var wg sync.WaitGroup
+	var dbErr, cacheErr error
+	wg.Add(2)
+	go func() { defer wg.Done(); dbErr = h.db.Ping(ctx) }()
+	go func() { defer wg.Done(); cacheErr = h.cache.Ping(ctx) }()
+	wg.Wait()
+
 	checks := map[string]string{"postgres": "ok", "redis": "ok"}
 	status := http.StatusOK
 
-	if err := h.db.Ping(ctx); err != nil {
+	if dbErr != nil {
 		checks["postgres"] = "unreachable"
 		status = http.StatusServiceUnavailable
-		h.logger.WarnContext(ctx, "readiness probe failed", "dependency", "postgres", "error", err)
+		h.logger.WarnContext(ctx, "readiness probe failed", "dependency", "postgres", "error", dbErr)
 	}
-	if err := h.cache.Ping(ctx); err != nil {
+	if cacheErr != nil {
 		checks["redis"] = "unreachable"
-		h.logger.WarnContext(ctx, "cache probe failed, redirects fall back to postgres", "error", err)
+		h.logger.WarnContext(ctx, "cache probe failed, redirects fall back to postgres", "error", cacheErr)
 	}
 
 	httpx.JSON(w, status, map[string]any{

@@ -14,6 +14,14 @@ type Link struct {
 	LongURL    string
 	ClickCount int64
 	CreatedAt  time.Time
+	// ExpiresAt is nil for links that never expire.
+	ExpiresAt *time.Time
+}
+
+// IsExpired reports whether the link has passed its expiry as of now. A link
+// with no expiry never expires.
+func (l Link) IsExpired(now time.Time) bool {
+	return l.ExpiresAt != nil && !now.Before(*l.ExpiresAt)
 }
 
 // User is an account. PasswordHash never leaves the repository layer in a

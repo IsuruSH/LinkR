@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref, so a rapid push sequence does not queue.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (vet, lint, test -race)
+    runs-on: ubuntu-latest
+
+    # Real dependencies, wired with the same URLs the app uses, so the
+    # integration tests exercise actual SQL and Redis rather than a fake.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: linkr
+          POSTGRES_PASSWORD: linkr_dev_password
+          POSTGRES_DB: linkr
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U linkr -d linkr"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://linkr:linkr_dev_password@localhost:5432/linkr?sslmode=disable
+      REDIS_URL: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: backend/go.sum
+
+      - name: go vet
+        working-directory: backend
+        run: go vet ./...
+
+      - name: gofmt
+        working-directory: backend
+        run: |
+          # internal/db is sqlc-generated; everything else must be gofmt-clean.
+          unformatted=$(gofmt -l . | grep -v '^internal/db/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: golangci-lint
+        # Run the pinned image directly rather than via the action: it removes
+        # the action-version/binary-version compatibility matrix, and this exact
+        # image is verified locally. A v1.x binary (built with go1.24) refuses a
+        # go1.25 module, which is why this is v2.
+        run: |
+          docker run --rm -v "${{ github.workspace }}/backend:/app" -w /app \
+            golangci/golangci-lint:v2.12.2 golangci-lint run --timeout 5m
+
+      - name: Unit tests (race)
+        working-directory: backend
+        run: go test -race ./...
+
+      - name: Integration tests (race)
+        working-directory: backend
+        run: go test -race -tags=integration ./tests/...
+
+      - name: Build server
+        working-directory: backend
+        run: go build ./cmd/server
+
+  sqlc:
+    name: sqlc (no drift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Regenerate from migrations + queries and fail if the committed code
+      # differs. This is what makes "generated code is committed" trustworthy:
+      # a migration edited without `make sqlc` cannot merge.
+      - name: Regenerate
+        run: docker run --rm -v "${{ github.workspace }}/backend:/src" -w /src sqlc/sqlc:1.29.0 generate
+
+      - name: Check for drift
+        run: |
+          if ! git diff --exit-code backend/internal/db; then
+            echo "internal/db is stale — run 'make sqlc' and commit the result."; exit 1
+          fi
+
+  frontend:
+    name: Frontend (lint, typecheck, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Prove both images still build from a clean context — the thing most
+      # likely to rot silently. Not pushed anywhere.
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

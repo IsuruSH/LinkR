@@ -42,7 +42,7 @@ export function CreateLinkDialog() {
 
   const form = useForm<CreateLinkInput>({
     resolver: zodResolver(createLinkSchema),
-    defaultValues: { url: "", alias: "" },
+    defaultValues: { url: "", alias: "", expiresAt: "" },
   });
 
   async function onSubmit(values: CreateLinkInput) {
@@ -50,6 +50,10 @@ export function CreateLinkDialog() {
       await createLink.mutateAsync({
         url: values.url,
         alias: values.alias?.trim() || undefined,
+        // datetime-local is local wall-clock time; new Date() interprets it in the
+        // browser's zone and toISOString() sends UTC, so the server stores the
+        // instant the user meant regardless of where they are.
+        expires_at: values.expiresAt ? new Date(values.expiresAt).toISOString() : undefined,
       });
       form.reset();
       setOpen(false);
@@ -137,6 +141,30 @@ export function CreateLinkDialog() {
               )}
             />
 
+            <FormField
+              control={form.control}
+              name="expiresAt"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>
+                    Expires{" "}
+                    <span className="text-muted-foreground font-normal">(optional)</span>
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      type="datetime-local"
+                      // Cannot pick a past instant in the picker itself; the zod
+                      // schema and the server enforce it for typed input.
+                      min={localDateTimeNow()}
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormDescription>Leave blank for a link that never expires.</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
             <DialogFooter>
               <Button
                 type="button"
@@ -156,4 +184,13 @@ export function CreateLinkDialog() {
       </DialogContent>
     </Dialog>
   );
+}
+
+// localDateTimeNow returns "YYYY-MM-DDTHH:mm" in the browser's local time, the
+// format <input type="datetime-local"> expects for its `min`. toISOString would
+// give UTC and mislabel the floor by the timezone offset.
+function localDateTimeNow(): string {
+  const now = new Date();
+  const offsetMs = now.getTimezoneOffset() * 60_000;
+  return new Date(now.getTime() - offsetMs).toISOString().slice(0, 16);
 }

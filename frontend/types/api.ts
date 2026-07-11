@@ -12,6 +12,8 @@ export interface Link {
   long_url: string;
   click_count: number;
   created_at: string;
+  /** null when the link never expires. */
+  expires_at: string | null;
 }
 
 export interface LinkPage {
@@ -72,6 +74,7 @@ export type ApiErrorCode =
   | "METHOD_NOT_ALLOWED"
   | "VALIDATION_FAILED"
   | "LINK_NOT_FOUND"
+  | "LINK_EXPIRED"
   | "ALIAS_TAKEN"
   | "INVALID_URL"
   | "INVALID_ALIAS"
@@ -80,4 +83,5 @@ export type ApiErrorCode =
   | "INVALID_CREDENTIALS"
   | "UNAUTHORIZED"
   | "INVALID_CURSOR"
-  | "CODE_GENERATION_FAILED";
+  | "CODE_GENERATION_FAILED"
+  | "RATE_LIMITED";

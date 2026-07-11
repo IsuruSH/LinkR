@@ -13,6 +13,9 @@ import (
 type createLinkRequest struct {
 	URL   string `json:"url"`
 	Alias string `json:"alias,omitempty"`
+	// ExpiresAt is an optional RFC3339 instant. Omitted or null means the link
+	// never expires. A pointer so "absent" and "the zero time" are distinct.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 // linkResponse is the shape of a link on the wire.
@@ -21,11 +24,12 @@ type createLinkRequest struct {
 // the client, so a deployment behind a custom domain does not need a frontend
 // rebuild to produce correct links.
 type linkResponse struct {
-	ShortCode  string    `json:"short_code"`
-	ShortURL   string    `json:"short_url"`
-	LongURL    string    `json:"long_url"`
-	ClickCount int64     `json:"click_count"`
-	CreatedAt  time.Time `json:"created_at"`
+	ShortCode  string     `json:"short_code"`
+	ShortURL   string     `json:"short_url"`
+	LongURL    string     `json:"long_url"`
+	ClickCount int64      `json:"click_count"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  *time.Time `json:"expires_at"`
 }
 
 func toLinkResponse(l domain.Link, baseURL string) linkResponse {
@@ -35,6 +39,7 @@ func toLinkResponse(l domain.Link, baseURL string) linkResponse {
 		LongURL:    l.LongURL,
 		ClickCount: l.ClickCount,
 		CreatedAt:  l.CreatedAt,
+		ExpiresAt:  l.ExpiresAt,
 	}
 }
 

@@ -14,14 +14,19 @@ import (
 )
 
 // Entry is what the redirect needs to serve a request and record its click:
-// the target URL, and the link ID the ClickEvent is keyed on.
+// the target URL, the link ID the ClickEvent is keyed on, and the expiry.
 //
 // Caching only the URL would be a subtle mistake: every cache hit would still
 // need a Postgres round trip to resolve the ID before it could record the
-// click, which defeats the point of the cache.
+// click, which defeats the point of the cache. The same reasoning applies to
+// ExpiresAt — a cache hit must be able to enforce expiry without reading
+// Postgres, or an expired link keeps redirecting from cache.
 type Entry struct {
 	LinkID  uuid.UUID `json:"id"`
 	LongURL string    `json:"url"`
+	// ExpiresAt is nil for links that never expire. Present so a cache hit can
+	// serve 410 without touching the database.
+	ExpiresAt *time.Time `json:"exp,omitempty"`
 }
 
 // Lookup distinguishes "not cached" from "cached as absent". Without the third

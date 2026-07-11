@@ -97,7 +97,7 @@ func newHarness(t *testing.T, clickCfg worker.Config) *harness {
 		t.Fatalf("registering test user: %v", err)
 	}
 
-	linkHandler := handler.NewLinkHandler(linkSvc, testBaseURL)
+	linkHandler := handler.NewLinkHandler(linkSvc, testBaseURL, "http://localhost:3000")
 	r := chi.NewRouter()
 	r.Get("/{code}", linkHandler.Redirect)
 
@@ -147,7 +147,7 @@ func TestIntegration_CreateRedirectClickStats(t *testing.T) {
 	h := newHarness(t, defaultClickCfg())
 	ctx := context.Background()
 
-	link, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/target", "")
+	link, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/target", "", nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestIntegration_RedirectDoesNotWaitForTheClickWrite(t *testing.T) {
 	h := newHarness(t, cfg)
 	ctx := context.Background()
 
-	link, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/async", "")
+	link, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/async", "", nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestIntegration_DeleteInvalidatesRedis(t *testing.T) {
 	h := newHarness(t, defaultClickCfg())
 	ctx := context.Background()
 
-	link, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/doomed", "")
+	link, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/doomed", "", nil)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestIntegration_ConcurrentClicksKeepCounterConsistent(t *testing.T) {
 	// Several links, so batches overlap on the same rows in different orders.
 	var links []domain.Link
 	for i := 0; i < 5; i++ {
-		l, err := h.linkSvc.Create(ctx, h.userID, fmt.Sprintf("https://example.com/%d", i), "")
+		l, err := h.linkSvc.Create(ctx, h.userID, fmt.Sprintf("https://example.com/%d", i), "", nil)
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -368,7 +368,7 @@ func TestIntegration_KeysetPaginationIsExact(t *testing.T) {
 
 	const total = 25
 	for i := 0; i < total; i++ {
-		if _, err := h.linkSvc.Create(ctx, h.userID, fmt.Sprintf("https://example.com/p%d", i), ""); err != nil {
+		if _, err := h.linkSvc.Create(ctx, h.userID, fmt.Sprintf("https://example.com/p%d", i), "", nil); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
@@ -412,7 +412,7 @@ func TestIntegration_KeysetPageIsStableUnderConcurrentInserts(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 10; i++ {
-		if _, err := h.linkSvc.Create(ctx, h.userID, fmt.Sprintf("https://example.com/s%d", i), ""); err != nil {
+		if _, err := h.linkSvc.Create(ctx, h.userID, fmt.Sprintf("https://example.com/s%d", i), "", nil); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
@@ -424,7 +424,7 @@ func TestIntegration_KeysetPageIsStableUnderConcurrentInserts(t *testing.T) {
 
 	// Someone creates a link between page 1 and page 2. With OFFSET 5 this would
 	// push a row from page 1 down onto page 2 and the client would see it twice.
-	if _, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/interloper", ""); err != nil {
+	if _, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/interloper", "", nil); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -444,5 +444,98 @@ func TestIntegration_KeysetPageIsStableUnderConcurrentInserts(t *testing.T) {
 		if l.LongURL == "https://example.com/interloper" {
 			t.Error("a link created after page 1 leaked into page 2")
 		}
+	}
+}
+
+// The rate limiter's Lua script against real Redis — the part a fake cannot
+// cover: that INCR+EXPIRE+TTL really are atomic, that the counter blocks at the
+// limit, and that the first hit gets a TTL so the window actually resets.
+func TestIntegration_RateLimiterLuaScript(t *testing.T) {
+	h := newHarness(t, defaultClickCfg())
+	ctx := context.Background()
+
+	// A unique key per run, and a 2-second window so the reset is observable
+	// without making the test slow.
+	key := "it-" + uuid.NewString()
+	const limit = 5
+	window := 2 * time.Second
+
+	for i := 1; i <= limit; i++ {
+		allowed, retryAfter, err := h.redis.Allow(ctx, key, limit, window)
+		if err != nil {
+			t.Fatalf("Allow #%d: %v", i, err)
+		}
+		if !allowed {
+			t.Fatalf("Allow #%d blocked at or below the limit", i)
+		}
+		// The first hit must carry a TTL, or the window would never reset and the
+		// caller would be limited forever.
+		if retryAfter <= 0 || retryAfter > window {
+			t.Errorf("Allow #%d retryAfter = %v, want in (0, %v]", i, retryAfter, window)
+		}
+	}
+
+	// One past the limit is blocked.
+	allowed, retryAfter, err := h.redis.Allow(ctx, key, limit, window)
+	if err != nil {
+		t.Fatalf("Allow over limit: %v", err)
+	}
+	if allowed {
+		t.Fatal("Allow permitted a request over the limit")
+	}
+	if retryAfter <= 0 {
+		t.Errorf("retryAfter = %v on a blocked request, want > 0 for Retry-After", retryAfter)
+	}
+
+	// After the window elapses, the counter resets and requests are allowed again.
+	time.Sleep(window + 250*time.Millisecond)
+	allowed, _, err = h.redis.Allow(ctx, key, limit, window)
+	if err != nil {
+		t.Fatalf("Allow after window: %v", err)
+	}
+	if !allowed {
+		t.Error("Allow still blocked after the window elapsed; the TTL did not reset the counter")
+	}
+}
+
+// Link expiration end to end: a link resolves (302) before it expires and is
+// Gone (410) after, and Redis stops holding it as a positive entry — the TTL
+// clamp meant it was only ever cached until expiry.
+func TestIntegration_LinkExpiresAndCacheDoesNotOutliveIt(t *testing.T) {
+	h := newHarness(t, defaultClickCfg())
+	ctx := context.Background()
+
+	expiresAt := time.Now().UTC().Add(2 * time.Second)
+	link, err := h.linkSvc.Create(ctx, h.userID, "https://example.com/ephemeral", "", &expiresAt)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Before expiry: 302, and the resolve fills the cache (clamped to expiry).
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+link.ShortCode, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("before expiry: status %d, want 302", rec.Code)
+	}
+
+	// The cache holds it now, but only until it expires.
+	if _, lookup, _ := h.redis.GetLink(ctx, link.ShortCode); lookup != cache.Hit {
+		t.Fatalf("expected a cache hit before expiry, got lookup=%v", lookup)
+	}
+
+	// Wait past expiry (plus the cache TTL clamp).
+	time.Sleep(2500 * time.Millisecond)
+
+	// After expiry: 410 Gone, not 302 and not 404.
+	rec = httptest.NewRecorder()
+	h.router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+link.ShortCode, nil))
+	if rec.Code != http.StatusGone {
+		t.Fatalf("after expiry: status %d, want 410 Gone", rec.Code)
+	}
+
+	// Redis must not be serving it as a positive entry: either the clamped TTL
+	// already dropped it, or the expired resolve negative-cached it.
+	if _, lookup, _ := h.redis.GetLink(ctx, link.ShortCode); lookup == cache.Hit {
+		t.Error("Redis still holds the expired link as a positive entry")
 	}
 }

@@ -21,7 +21,10 @@ import (
 	"github.com/IsuruSh/linkr/internal/service"
 )
 
-const baseURL = "http://localhost:8080"
+const (
+	baseURL = "http://localhost:8080"
+	appURL  = "http://localhost:3000"
+)
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -49,7 +52,7 @@ type stubLinkRepo struct {
 	found bool
 }
 
-func (s stubLinkRepo) Create(context.Context, uuid.UUID, string, string) (domain.Link, error) {
+func (s stubLinkRepo) Create(context.Context, uuid.UUID, string, string, *time.Time) (domain.Link, error) {
 	return s.link, nil
 }
 func (s stubLinkRepo) GetByShortCode(context.Context, string) (domain.Link, error) {
@@ -110,7 +113,7 @@ func TestRedirect_Writes302BeforeRecordingTheClick(t *testing.T) {
 	)
 
 	r := chi.NewRouter()
-	r.Get("/{code}", NewLinkHandler(svc, baseURL).Redirect)
+	r.Get("/{code}", NewLinkHandler(svc, baseURL, appURL).Redirect)
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/abc1234", nil))
 
 	if rec.Code != http.StatusFound {
@@ -148,7 +151,7 @@ func TestRedirect_IsNotCacheable(t *testing.T) {
 	)
 
 	r := chi.NewRouter()
-	r.Get("/{code}", NewLinkHandler(svc, baseURL).Redirect)
+	r.Get("/{code}", NewLinkHandler(svc, baseURL, appURL).Redirect)
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/abc1234", nil))
 
 	cc := rec.Header().Get("Cache-Control")
@@ -171,7 +174,7 @@ func TestRedirect_UnknownCodeIsNotFoundAndRecordsNothing(t *testing.T) {
 	)
 
 	r := chi.NewRouter()
-	r.Get("/{code}", NewLinkHandler(svc, baseURL).Redirect)
+	r.Get("/{code}", NewLinkHandler(svc, baseURL, appURL).Redirect)
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nosuch", nil))
 
 	if rec.Code != http.StatusNotFound {
@@ -208,7 +211,7 @@ func TestCreate_WithoutAuthContextFailsClosed(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/links", nil)
-	NewLinkHandler(svc, baseURL).Create(rec, req)
+	NewLinkHandler(svc, baseURL, appURL).Create(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 when the user ID is absent from context", rec.Code)
@@ -232,7 +235,7 @@ func TestCreate_ReturnsCreatedWithShortURL(t *testing.T) {
 		strings.NewReader(`{"url":"https://example.com"}`))
 	req = req.WithContext(middleware.WithUserID(req.Context(), userID))
 
-	NewLinkHandler(svc, baseURL).Create(rec, req)
+	NewLinkHandler(svc, baseURL, appURL).Create(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201. body: %s", rec.Code, rec.Body.String())

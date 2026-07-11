@@ -84,12 +84,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
       toast.success(mode === "login" ? "Welcome back" : "Account created");
 
       // Honour ?next= from middleware, so a deep link survives the login bounce.
-      // Only same-origin paths: an attacker-supplied absolute URL here would be
-      // an open redirect.
-      const next = searchParams.get("next");
-      const target = next?.startsWith("/") && !next.startsWith("//") ? next : "/dashboard/links";
-
-      router.push(target);
+      router.push(safeNext(searchParams.get("next")));
       router.refresh();
     } catch (err) {
       const apiError = toApiError(err);
@@ -178,4 +173,15 @@ export function AuthForm({ mode }: { mode: Mode }) {
       </form>
     </Form>
   );
+}
+
+// safeNext validates the ?next= redirect target. It must be a same-origin
+// absolute PATH: exactly one leading slash, and the next character is neither a
+// slash nor a backslash. That rejects "//evil.com" (protocol-relative) and
+// "/\evil.com" — which browsers normalize to "//evil.com" — both open-redirect
+// vectors a plain `startsWith("/") && !startsWith("//")` check misses.
+export function safeNext(next: string | null): string {
+  const fallback = "/dashboard/links";
+  if (!next || !/^\/[^/\\]/.test(next)) return fallback;
+  return next;
 }

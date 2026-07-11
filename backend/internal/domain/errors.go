@@ -17,6 +17,7 @@ const (
 	CodeMethodNotAllowed   Code = "METHOD_NOT_ALLOWED"
 	CodeValidation         Code = "VALIDATION_FAILED"
 	CodeLinkNotFound       Code = "LINK_NOT_FOUND"
+	CodeLinkExpired        Code = "LINK_EXPIRED"
 	CodeAliasTaken         Code = "ALIAS_TAKEN"
 	CodeInvalidURL         Code = "INVALID_URL"
 	CodeInvalidAlias       Code = "INVALID_ALIAS"
@@ -26,6 +27,7 @@ const (
 	CodeUnauthorized       Code = "UNAUTHORIZED"
 	CodeInvalidCursor      Code = "INVALID_CURSOR"
 	CodeCodeGeneration     Code = "CODE_GENERATION_FAILED"
+	CodeRateLimited        Code = "RATE_LIMITED"
 )
 
 // Error is the single error type crossing layer boundaries. Services return it,
@@ -72,9 +74,11 @@ func (e *Error) WithDetails(d map[string]string) *Error {
 // Sentinels for errors.Is comparison.
 var (
 	ErrLinkNotFound       = NewError(CodeLinkNotFound, "link not found")
+	ErrLinkExpired        = NewError(CodeLinkExpired, "this link has expired")
 	ErrAliasTaken         = NewError(CodeAliasTaken, "that alias is already taken")
 	ErrEmailTaken         = NewError(CodeEmailTaken, "an account with that email already exists")
 	ErrInvalidCredentials = NewError(CodeInvalidCredentials, "invalid email or password")
 	ErrUnauthorized       = NewError(CodeUnauthorized, "authentication required")
 	ErrInvalidCursor      = NewError(CodeInvalidCursor, "malformed pagination cursor")
+	ErrRateLimited        = NewError(CodeRateLimited, "too many requests, please slow down")
 )
