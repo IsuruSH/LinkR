@@ -5,6 +5,8 @@ how often each is clicked over time.
 
 **Stack:** Go API · Next.js frontend · PostgreSQL · Redis · Nginx (production).
 
+**▶ Live demo:** <https://parfumworld.store> — sign in with `demo@linkr.dev` / `demo-password-123`.
+
 ---
 
 ## Architecture
@@ -94,6 +96,42 @@ make test              # unit tests, race detector on, no services needed
 make test-integration  # against a real Postgres + Redis
 make lint              # go vet + gofmt
 ```
+
+---
+
+## Requirements coverage
+
+**Core — all met.**
+
+| # | Requirement | Where |
+|---|---|---|
+| 1 | `POST /api/links` — auto code, optional alias, URL validation, reject dupes/invalid | `handler/link.go`; `ValidateLongURL` / `ValidateAlias` + reserved-alias list; taken alias → **409** |
+| 2 | `GET /{code}` — **302**, click recorded asynchronously | `handler/link.go` writes the `302`, then hands the click to the worker |
+| 3 | `GET /api/links` — pagination | keyset/cursor `List` |
+| 4 | `GET /api/links/{code}/stats` — total + clicks bucketed by day | `Stats`, zero-filled day series |
+| 5 | Persist in PostgreSQL | pgx + pgxpool, goose migrations, sqlc |
+| 6 | JWT on write/list/stats; redirect public | `requireAuth` wraps the whole `/api/links` group; `GET /{code}` is open |
+| 7 | Structured errors + correct status codes | `httpx` error envelope + one domain→status table |
+| — | **Scale/perf (required)** | Redis hot-path cache + negative caching, batched async click writes, connection pooling, keyset indexes, stateless backend + replicas behind Nginx, graceful degradation (Redis down → Postgres), graceful shutdown |
+| 8 | Dashboard: short URL, target, total clicks | `components/features/links-table.tsx` |
+| 9 | Create form, client + server error handling | `create-link-dialog.tsx` (zod + surfaced server errors) |
+| 10 | Per-link stats chart | `clicks-chart.tsx` (Recharts) |
+| 11 | Loading + error states | skeletons + error states across features |
+| 12 | README with exact local steps | this file — `docker compose up --build` |
+| 13 | Backend tests on non-trivial logic | ~90 tests: short-code bias/collision, URL/alias validation, worker flush/drop/drain, all `-race` |
+
+**Stretch — implemented.**
+
+| Goal | Notes |
+|---|---|
+| Rate limiting on link creation | Redis Lua fixed-window, per-user (plus per-IP on auth) |
+| Cache for the redirect + invalidation | Redis (a deliberate deviation from "in-memory" — see `DECISIONS.md`); invalidated on update/delete |
+| Link expiration | `410 Gone` + cache TTL clamped to expiry |
+| Dockerize + one-command compose | `docker compose up --build` runs the full stack |
+| Hosting / public URL | live at <https://parfumworld.store> |
+| CI (lint, test, build) | vet, gofmt, golangci-lint, `-race`, integration, sqlc-drift, frontend lint/build, image push to GHCR |
+
+Not attempted: real-time-ish stats updates (the dashboard refetches on mutation, but stats are not live-polled) — see `DECISIONS.md` for the approach a follow-up week would take.
 
 ---
 
