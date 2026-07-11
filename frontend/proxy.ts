@@ -73,8 +73,11 @@ export const config = {
    * /api/auth must be excluded or login itself would be redirected to /login.
    * /api/bff must be excluded because it answers 401 as JSON; redirecting an
    * XHR to an HTML login page produces the classic "unexpected token <" error.
+   * /l/ (link-status pages) is excluded so a logged-out visitor the backend
+   * bounced here for an expired/missing link is never sent on to /login — the
+   * whole point of that page is to be reachable without a session.
    */
   matcher: [
-    "/((?!api/|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!api/|l/|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
