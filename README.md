@@ -135,30 +135,40 @@ Docker Compose — one host, one command — just a different compose file.
 ### First-time setup on EC2
 
 1. **Instance & firewall.** Launch an instance (Ubuntu). In its security group,
-   allow inbound **22 (SSH)**, **80**, and **443** only.
+   allow inbound **22 (SSH)**, **80**, and **443** only. (80 is needed for the
+   Let's Encrypt challenge and the HTTP→HTTPS redirect; the app is served on 443.)
 
-2. **Install Docker + Compose:**
+2. **DNS.** Point an **A record** for your domain at the instance's public IP
+   (e.g. `parfumworld.store → 16.171.38.92`). TLS issuance needs the domain to
+   resolve to this host.
+
+3. **Install Docker + Compose:**
    ```bash
    curl -fsSL https://get.docker.com | sudo sh
    sudo usermod -aG docker $USER      # log out/in so docker runs without sudo
    ```
    The Compose plugin ships with Docker Engine; verify with `docker compose version`.
 
-3. **Clone and configure:**
+4. **Clone and configure:**
    ```bash
    git clone <repo-url> linkr && cd linkr
    cp .env.example .env
    ```
-   Edit `.env` and set the four production values at the top:
-   - `APP_ORIGIN` — your public URL (domain or the EC2 DNS), e.g.
-     `http://ec2-1-2-3-4.compute.amazonaws.com`. The compose file derives every
-     other URL from this, so you set it **once**.
+   Edit `.env` and set the production values:
+   - `APP_ORIGIN` — your **https** URL, e.g. `https://parfumworld.store`. The
+     compose file derives every other URL from this, so you set it **once**.
+   - `DOMAIN` — the bare domain, e.g. `parfumworld.store` (certbot issues the cert
+     for it). `CERTBOT_EMAIL` — your email, for renewal notices.
    - `JWT_SECRET` — `openssl rand -base64 48`. The server refuses to start in
      production with the example value.
    - `POSTGRES_PASSWORD` — a real password.
    - `SEED_DEMO_DATA` — `true` for a demo, `false` for a clean install.
 
-4. **Log in to the image registry (one-time).** The app images are built by CI
+   > Tip: set `CERTBOT_STAGING=1` for your first run to use Let's Encrypt's
+   > staging CA (untrusted, but no rate limits) and confirm the whole flow works.
+   > Then set it back to `0` and re-run the deploy for the real certificate.
+
+5. **Log in to the image registry (one-time).** The app images are built by CI
    and stored privately in GHCR, so the host authenticates once to pull them:
    ```bash
    echo "<GHCR_TOKEN>" | docker login ghcr.io -u <github-username> --password-stdin
@@ -166,12 +176,14 @@ Docker Compose — one host, one command — just a different compose file.
    `<GHCR_TOKEN>` is a GitHub Personal Access Token with the `read:packages`
    scope. (Skip this if you made the images public.)
 
-5. **Start it:**
+6. **Deploy — one command.**
    ```bash
-   docker compose -f docker-compose.prod.yml up -d
+   bash scripts/deploy.sh
    ```
-   This **pulls** the images and starts everything — no build runs on the host.
-   The app is now on `http://<APP_ORIGIN>/`.
+   This pulls the images, **obtains the TLS certificate** (via certbot), starts
+   everything, and waits for health. No build runs on the host. Your app is now
+   live at **`https://<DOMAIN>/`**, with HTTP redirecting to HTTPS and the
+   certificate auto-renewing.
 
 > **Images are built in CI, not on the server.** GitHub Actions builds the
 > backend and frontend on every push to `main` and pushes them to GHCR
@@ -230,10 +242,15 @@ The Postgres and Redis data live in named Docker volumes, so `docker compose dow
 
 ### HTTPS
 
-`nginx/nginx.conf` ships HTTP-only with a commented, ready-to-enable `443` block
-and an ACME challenge location. To turn on TLS: point a DNS record at the host,
-issue a certificate with certbot (webroot `/var/www/certbot`), then uncomment the
-`443` server block and reload Nginx.
+TLS is automatic. `scripts/init-tls.sh` (run by `deploy.sh` on the first deploy)
+obtains a Let's Encrypt certificate over the ACME HTTP-01 challenge; Nginx serves
+443, redirects HTTP→HTTPS, and sends HSTS. A `certbot` service renews the cert
+before expiry and Nginx reloads every few hours to pick it up — no manual
+renewal. The domain lives only in `.env` (`DOMAIN`); the cert is stored under the
+fixed name `linkr`, so nothing in `nginx.conf` is tied to one site.
+
+If issuance fails, it's almost always DNS (the A record hasn't propagated to this
+host yet) or a closed port 80. Re-run `bash scripts/init-tls.sh` once DNS resolves.
 
 ---
 

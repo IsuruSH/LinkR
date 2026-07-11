@@ -26,19 +26,25 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-echo "==> [1/4] Pulling latest code"
+echo "==> [1/5] Pulling latest code"
 # --ff-only refuses to create a surprise merge commit if local history diverged.
 git pull --ff-only
 
-echo "==> [2/4] Pulling images (app images from GHCR; postgres/redis/nginx official)"
+echo "==> [2/5] Pulling images (app images from GHCR; postgres/redis/nginx official)"
 # Fails with 'denied' if this host has not `docker login ghcr.io`'d for private
 # images — see the header for the one-time login.
 $COMPOSE pull
 
-echo "==> [3/4] Starting / updating containers (waiting for healthchecks)"
+echo "==> [3/5] Ensuring the TLS certificate exists"
+# Idempotent: obtains the Let's Encrypt cert on the first deploy (needs DNS +
+# ports 80/443), and does nothing on subsequent deploys. Auto-renewal is handled
+# by the certbot service.
+bash scripts/init-tls.sh
+
+echo "==> [4/5] Starting / updating containers (waiting for healthchecks)"
 $COMPOSE up -d --remove-orphans --wait
 
-echo "==> [4/4] Pruning dangling images"
+echo "==> [5/5] Pruning dangling images"
 docker image prune -f
 
 echo

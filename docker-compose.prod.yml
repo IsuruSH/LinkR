@@ -26,23 +26,41 @@ services:
       backend: {condition: service_healthy}
     ports:
       - "80:80"
-      - "443:443" # pre-mapped; nothing listens until TLS is enabled in nginx.conf
+      - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - nginx_logs:/var/log/nginx
-      # Future HTTPS: certbot writes the challenge + certs into these volumes and
-      # nginx reads them. Mounting now means enabling TLS is an nginx.conf change,
-      # not a compose change.
+      # certbot writes the ACME challenge + certs into these volumes; nginx reads
+      # them (read-only). The cert lives at /etc/letsencrypt/live/linkr/.
       - certbot_webroot:/var/www/certbot:ro
       - letsencrypt:/etc/letsencrypt:ro
+    # Reload every 6h so a renewed certificate is picked up without a restart.
+    # `exec nginx` keeps nginx as PID 1 (graceful SIGTERM on `compose down`); the
+    # reload loop runs alongside it. Requires a cert to exist — scripts/init-tls.sh
+    # creates a placeholder before the first start.
+    command: ["sh", "-c", "while :; do sleep 6h & wait $${!}; nginx -s reload; done & exec nginx -g 'daemon off;'"]
     healthcheck:
-      # Hits the self-answered /__nginx_health, so Nginx reports on itself rather
-      # than on an upstream. busybox wget ships in nginx:alpine.
+      # Hits the self-answered /__nginx_health over :80, so Nginx reports on
+      # itself rather than on an upstream. busybox wget ships in nginx:alpine.
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/__nginx_health"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 5s
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [linkr_net]
+
+  # ── Certbot — obtains and auto-renews the TLS certificate ──────────────
+  # First issuance is done by scripts/init-tls.sh. This service then loops
+  # `certbot renew` (a no-op until ~30 days before expiry); nginx's reload loop
+  # above picks up the renewed cert within 6h.
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    entrypoint: ["sh", "-c", "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h & wait $${!}; done"]
     restart: unless-stopped
     logging: *default-logging
     networks: [linkr_net]
